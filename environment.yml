@@ -1,0 +1,15 @@
+name: ccat
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - astropy
+  - matplotlib
+  - jupyter
+  - jupyterlab
+  - spt3g
+  - h5py
+  - pip

@@ -1,0 +1,77 @@
+# ============================================================
+# CCAT Quick-Look Mapmaker -- Configuration File
+# ============================================================
+
+[data]
+# Glob patterns expanded recursively for *.g3 files.
+input_dirs = ["../quick_look/simulation/sim_PCAM280_g3_Jupiter_d3426/Jupiter-*-*"]
+
+# "simulation" -- TOAST simulation files (quaternion pointing, compressed signal)
+# "blasttng"   -- BLAST-TNG g3 files (az/el pointing, raw I/Q) [not yet implemented]
+format = "simulation"
+
+
+[map]
+# Map centre in celestial coordinates (degrees).
+# If omitted, auto-detected as mean boresight position.
+ra0_deg  = 142.0
+dec0_deg = 15.6
+
+# Map extent (degrees) and pixel size (arcminutes).
+xlen_deg   = 1.0
+ylen_deg   = 1.0
+res_arcmin = 0.25
+
+
+[pipeline]
+# Common-mode subtraction iterations after the naive map.
+# 0 = naive map only, 3-5 = good balance of quality vs runtime.
+n_iterations = 4
+
+# Time window: skip start_offset_s seconds, then process max_duration_s seconds.
+# Comment out max_duration_s to process the full observation.
+start_offset_s = 150
+max_duration_s = 100
+
+# Chunk duration in seconds. Smaller = less memory, larger = better common-mode estimate.
+# 0 or negative = one chunk per G3 frame.
+chunk_duration_s = 1.0
+
+# Cosmic ray spike removal.
+clean_cosmic_rays = true
+
+# High-pass filter cutoff (Hz). Removes atmospheric drift.
+# Disable for simulation data -- no atmosphere, filter distorts point-source signal.
+highpass_cutoff_hz = 0.0
+
+# Samples per map-binning pass. 0 = full timestream at once.
+# Set to ~10000 for the full CCAT array (~40k detectors) to cap peak memory.
+time_chunk_size = 0
+
+# Detector exclusion from the combined map.
+# auto_exclude_threshold: flag detectors with std > N * median std across all detectors.
+# Set to 0 to disable auto-exclusion.
+auto_exclude_threshold = 5.0
+exclude_detectors      = []   # e.g. ["PC_f280_A_001"]
+exclude_detector_indices = [] # e.g. [0, 5, 100]
+
+
+[output]
+output_dir = "output"
+save_numpy = true
+save_png   = true
+
+
+[per_detector]
+# Per-detector maps for pointing model reconstruction.
+# Each detector gets its own map; peak RA/Dec centroid saved to centroids.json.
+enabled         = true
+save_png        = true
+save_numpy      = false
+noise_threshold = 3.0    # flag detectors with off-source RMS > threshold * median RMS
+
+# Detector selection -- choose ONE of the following:
+#   max_detectors = 0               # 0 = all; N = evenly sample N detectors
+#   detectors = ["PC_f280_A_001"]   # specific detectors by name
+#   detector_indices = [0, 5, 100]  # specific detectors by index
+max_detectors = 0

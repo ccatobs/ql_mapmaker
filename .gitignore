@@ -1,0 +1,13 @@
+.DS_Store
+.Rhistory
+__pycache__/
+*.pyc
+*.pyo
+
+ccat_mapmaker_AY/
+ccat_mapmaker/output/
+external/
+initial_readings/
+logbook.md
+quick_look/
+simulation_data_from_ankur/

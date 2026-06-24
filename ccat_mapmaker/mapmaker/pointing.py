@@ -1,0 +1,79 @@
+# ============================================================================ #
+# pointing.py
+#
+# Converts telescope pointing to sky coordinates (RA, Dec) for each detector.
+#
+# Simulation format: boresight is a quaternion timestream (one per sample).
+#   Each detector has a fixed offset quaternion from the focal plane file.
+#   Combining the two gives per-detector RA/Dec.
+#
+# Imported by reader.py to load data
+# ============================================================================ #
+
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+_Z_AXIS = np.array([0.0, 0.0, 1.0])
+
+
+def _pointing_to_radec(pointing: np.ndarray) -> tuple:
+    """Convert (n_samps, 3) unit vectors to (ra, dec) in degrees."""
+    ra  = np.degrees(np.arctan2(pointing[:, 1], pointing[:, 0])) % 360.0
+    dec = np.degrees(np.arcsin(np.clip(pointing[:, 2], -1.0, 1.0)))
+    return ra, dec
+
+
+def precompute_det_directions(det_quats: np.ndarray) -> np.ndarray:
+    """
+    Rotate the z-axis by each detector's offset quaternion -> (n_dets, 3).
+
+    Called once at focalplane load. Avoids recomputing per frame using:
+        (R_bore * R_det).apply(z) == R_bore.apply(R_det.apply(z))
+
+    Parameters
+    ----------
+    det_quats : (n_dets, 4), vector-first (x, y, z, w).
+    """
+    return Rotation.from_quat(det_quats).apply(_Z_AXIS)
+
+
+def boresight_to_radec(boresight_q: np.ndarray) -> tuple:
+    """
+    Boresight quaternion timestream -> (ra, dec, boresight_r).
+
+    boresight_r is returned so callers can reuse it per detector
+    without rebuilding it.
+
+    Parameters
+    ----------
+    boresight_q : (n_samps, 4), scalar-first (w, x, y, z).
+    """
+    # Reorder w,x,y,z → x,y,z,w to match scipy's convention
+    boresight_r = Rotation.from_quat(boresight_q[:, [1, 2, 3, 0]])
+    ra, dec = _pointing_to_radec(boresight_r.apply(_Z_AXIS))
+    return ra, dec, boresight_r
+
+
+def det_radec_from_boresight(boresight_r, det_dir: np.ndarray) -> tuple:
+    """
+    Per-sample RA/Dec for one detector. Hot path — called once per detector
+    per frame, reusing boresight_r from boresight_to_radec.
+
+    Parameters
+    ----------
+    boresight_r : Rotation of shape (n_samps,).
+    det_dir     : (3,) precomputed direction from precompute_det_directions.
+    """
+    return _pointing_to_radec(boresight_r.apply(det_dir))
+
+
+# Adapted from Bonnie Slocombe, external/g3_mapmaking/mapmaker/g3mapmaker.py
+# Not used in the pipeline,  superseded by boresight_to_radec +
+# det_radec_from_boresight. Kept as reference for the original approach.
+def quaternion_to_radec(boresight_q: np.ndarray, det_q: np.ndarray):
+    # Reorder boresight: TOAST scalar-first (w,x,y,z) → scipy vector-first (x,y,z,w)
+    boresight_r = Rotation.from_quat(boresight_q[:, [1, 2, 3, 0]])
+    det_r       = Rotation.from_quat(det_q)  # focalplane file is already vector-first
+    combined_r  = boresight_r * det_r
+    z_axis      = np.array([0.0, 0.0, 1.0])
+    return _pointing_to_radec(combined_r.apply(z_axis))

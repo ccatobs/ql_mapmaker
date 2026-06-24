@@ -1,0 +1,435 @@
+# ============================================================================ #
+# output.py
+#
+# Save map outputs to disk.
+# ============================================================================ #
+
+import json
+import math
+import pathlib
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+
+FONT_TITLE  = 13
+FONT_LABEL  = 11
+FONT_TICK   = 9
+CMAP_SIGNAL = "plasma"
+CMAP_HITS   = "viridis"
+DPI         = 200
+
+
+def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarray,
+                           ra_edges: np.ndarray, dec_edges: np.ndarray,
+                           out_dir: pathlib.Path, pd_cfg: dict):
+    """
+    Save per-detector signal maps and centroids for pointing model reconstruction.
+
+    For each detector:
+      - Computes the signal map (data / hits)
+      - Finds the peak pixel and records its RA/Dec as the centroid
+      - Optionally saves a PNG and/or .npy file
+
+    Centroids for all detectors are saved to centroids.json regardless of
+    save_png/save_numpy settings.
+    """
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    save_png   = pd_cfg.get("save_png",   True)
+    save_numpy = pd_cfg.get("save_numpy", False)
+
+    ra_centres  = 0.5 * (ra_edges[:-1]  + ra_edges[1:])
+    dec_centres = 0.5 * (dec_edges[:-1] + dec_edges[1:])
+
+    centroids = {}
+    n_dets = len(kids)
+
+    for j, name in enumerate(kids):
+        data = det_data[j].astype(float)
+        hits = det_hits[j].astype(float)
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            m = np.where(hits > 0, data / hits, np.nan)
+
+        peak_snr = float("nan")
+        peak_ra  = float("nan")
+        peak_dec = float("nan")
+        if np.any(np.isfinite(m)):
+            flat_idx        = np.nanargmax(m)
+            iy, ix          = np.unravel_index(flat_idx, m.shape)
+            peak_ra         = float(ra_centres[ix])
+            peak_dec        = float(dec_centres[iy])
+            off_mask        = np.isfinite(m) & (m < np.nanpercentile(m[np.isfinite(m)], 50))
+            noise           = float(np.sqrt(np.nanmean(m[off_mask] ** 2))) if off_mask.any() else float("nan")
+            peak_snr        = float(np.nanmax(m)) / noise if noise > 0 else float("nan")
+
+        centroids[name] = dict(peak_ra_deg=peak_ra, peak_dec_deg=peak_dec,
+                               peak_snr=peak_snr, off_src_rms=noise)
+
+        safe_name = name.replace("/", "_").replace(" ", "_")
+
+        if save_numpy:
+            np.save(out_dir / f"{safe_name}.npy", m)
+
+        if save_png:
+            vmin, vmax = _percentile_scale(m)
+            _plot_map(m, ra_edges, dec_edges,
+                      filepath=out_dir / f"{safe_name}.png",
+                      title=f"Detector: {name}",
+                      cmap=CMAP_SIGNAL, vmin=vmin, vmax=vmax,
+                      cbar_label="Signal")
+
+        if (j + 1) % 50 == 0 or (j + 1) == n_dets:
+            print(f"    {j + 1}/{n_dets} detectors saved")
+
+    with open(out_dir / "centroids.json", "w") as f:
+        json.dump(centroids, f, indent=2)
+    print(f"    Saved centroids.json ({n_dets} detectors)")
+
+    # Flag noisy detectors
+    threshold = pd_cfg.get("noise_threshold", 3.0)
+    rms_vals  = [v["off_src_rms"] for v in centroids.values()
+                 if np.isfinite(v["off_src_rms"])]
+    flagged   = {}
+    if rms_vals:
+        median_rms = float(np.median(rms_vals))
+        cutoff     = threshold * median_rms
+        flagged    = {name: {"off_src_rms": v["off_src_rms"],
+                             "ratio_to_median": v["off_src_rms"] / median_rms}
+                     for name, v in centroids.items()
+                     if np.isfinite(v["off_src_rms"]) and v["off_src_rms"] > cutoff}
+        with open(out_dir / "flagged_detectors.json", "w") as f:
+            json.dump({"median_rms": median_rms,
+                       "threshold_factor": threshold,
+                       "cutoff_rms": cutoff,
+                       "n_flagged": len(flagged),
+                       "detectors": flagged}, f, indent=2)
+        print(f"    Noise median={median_rms:.4f}  cutoff={cutoff:.4f} "
+              f"({threshold}x)  flagged={len(flagged)}/{n_dets}")
+        print(f"    Saved flagged_detectors.json")
+
+    return flagged
+
+
+def save_iteration_maps(naive: np.ndarray,
+                        cm_maps: list[tuple[str, np.ndarray]],
+                        hits: np.ndarray,
+                        ra_edges: np.ndarray, dec_edges: np.ndarray,
+                        output_dir: pathlib.Path,
+                        out_cfg: dict):
+    """
+    Save naive map, CM iteration maps, hits, and noise to disk.
+
+    Writes .npy and .png for each map, plus an overview grid (overview.png).
+    Grid layout: naive + all CM iterations in the top rows, hits + noise below.
+    """
+    output_dir = pathlib.Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        noise = np.where(hits > 0, 1.0 / np.sqrt(hits), np.nan)
+
+    all_maps = [("naive", naive)] + cm_maps + [("hits", hits), ("noise", noise)]
+
+    if out_cfg.get("save_numpy", True):
+        for label, m in all_maps:
+            np.save(output_dir / f"{label}.npy", m)
+        np.save(output_dir / "ra_edges.npy",  ra_edges)
+        np.save(output_dir / "dec_edges.npy", dec_edges)
+        print(f"    Saved {len(all_maps)} .npy files")
+
+    if out_cfg.get("save_png", True):
+        signal_maps = [("naive", naive)] + cm_maps
+        sig_vmin, sig_vmax   = _global_scale(signal_maps)
+        hits_vmin, hits_vmax = _percentile_scale(hits)
+        noise_vmin, noise_vmax = _percentile_scale(noise)
+
+        for label, m in signal_maps:
+            _plot_map(m, ra_edges, dec_edges,
+                      filepath=output_dir / f"{label}.png",
+                      title=_pretty_title(label),
+                      cmap=CMAP_SIGNAL, vmin=sig_vmin, vmax=sig_vmax,
+                      cbar_label="Signal")
+        _plot_map(hits, ra_edges, dec_edges,
+                  filepath=output_dir / "hits.png",
+                  title="Hit Map",
+                  cmap=CMAP_HITS, vmin=hits_vmin, vmax=hits_vmax,
+                  cbar_label="Samples per pixel")
+        _plot_map(noise, ra_edges, dec_edges,
+                  filepath=output_dir / "noise.png",
+                  title="Noise Map",
+                  cmap=CMAP_HITS, vmin=noise_vmin, vmax=noise_vmax,
+                  cbar_label="1 / sqrt(hits)")
+
+        print(f"    Saved {len(all_maps)} individual PNGs")
+        print(f"      Signal scale : {sig_vmin:.3f} - {sig_vmax:.3f}")
+
+        _plot_overview_grid(naive, cm_maps, hits, noise,
+                            ra_edges, dec_edges,
+                            filepath=output_dir / "overview.png",
+                            sig_vmin=sig_vmin, sig_vmax=sig_vmax,
+                            hits_vmin=hits_vmin, hits_vmax=hits_vmax,
+                            noise_vmin=noise_vmin, noise_vmax=noise_vmax)
+        print("    Saved overview.png")
+
+
+def compute_convergence_metrics(naive: np.ndarray,
+                                cm_maps: list[tuple[str, np.ndarray]],
+                                hits: np.ndarray) -> dict:
+    """
+    Compute per-iteration diagnostics to track convergence.
+
+    Off-source mask is defined once from the final map: valid pixels (hits > 0)
+    where signal is below the 50th percentile. This works for both point sources
+    and extended emission as long as less than half the map is source-dominated.
+
+    Returns a dict with lists (one entry per map stage, starting from naive):
+      labels       : stage name
+      peak         : peak signal value
+      off_src_rms  : RMS in the off-source region
+      map_diff_rms : RMS difference from the previous stage (NaN for naive)
+    """
+    all_maps = [("naive", naive)] + cm_maps
+    final_map = cm_maps[-1][1] if cm_maps else naive
+
+    valid      = hits > 0
+    threshold  = np.nanpercentile(final_map[valid], 50)
+    off_source = valid & (final_map < threshold)
+
+    labels, peaks, rms_vals, diff_rms = [], [], [], []
+    prev = None
+    for label, m in all_maps:
+        labels.append(label)
+        peaks.append(float(np.nanmax(m)))
+        rms_vals.append(float(np.sqrt(np.nanmean(m[off_source] ** 2))))
+        if prev is None:
+            diff_rms.append(float("nan"))
+        else:
+            diff = m - prev
+            diff_rms.append(float(np.sqrt(np.nanmean(diff[valid] ** 2))))
+        prev = m
+
+    return dict(labels=labels, peak=peaks, off_src_rms=rms_vals, map_diff_rms=diff_rms)
+
+
+def plot_psd(raw_tod: np.ndarray, cleaned_tod: np.ndarray,
+             sample_rate: float, filepath: pathlib.Path,
+             n_det_sample: int = 10):
+    """
+    PSD diagnostic comparing raw timestreams vs common-mode-cleaned timestreams.
+
+    Computes Welch PSD for up to n_det_sample evenly-spaced detectors and plots
+    median + 25–75th percentile band on a log-log scale.
+    """
+    from scipy.signal import welch
+
+    n_dets  = raw_tod.shape[1]
+    det_idx = np.linspace(0, n_dets - 1, min(n_det_sample, n_dets), dtype=int)
+    nperseg = min(256, raw_tod.shape[0])
+
+    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+
+    for tod, label, color in [
+        (raw_tod,     "Raw (before CM)",    "#e74c3c"),
+        (cleaned_tod, "Cleaned (after CM)", "#2980b9"),
+    ]:
+        psds = []
+        for i in det_idx:
+            f, p = welch(tod[:, i], fs=sample_rate, nperseg=nperseg)
+            psds.append(p)
+        psds = np.array(psds)
+        med  = np.median(psds, axis=0)
+        lo   = np.percentile(psds, 25, axis=0)
+        hi   = np.percentile(psds, 75, axis=0)
+        ax.loglog(f[1:], med[1:], color=color, linewidth=1.5, label=label)
+        ax.fill_between(f[1:], lo[1:], hi[1:], color=color, alpha=0.2)
+
+    ax.set_xlabel("Frequency (Hz)", fontsize=FONT_LABEL)
+    ax.set_ylabel("Power Spectral Density", fontsize=FONT_LABEL)
+    ax.set_title("Timestream PSD: Before vs After Common-Mode Subtraction",
+                 fontsize=FONT_TITLE, fontweight="bold")
+    ax.tick_params(labelsize=FONT_TICK)
+    ax.legend(fontsize=FONT_TICK)
+    ax.grid(True, which="both", alpha=0.2)
+    fig.suptitle("CCAT Prime-Cam Quick-Look Diagnostic",
+                 fontsize=12, fontweight="bold", color="#444444", y=1.02)
+
+    plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_diagnostics(metrics: dict, pass_times: list[tuple[str, float]],
+                     filepath: pathlib.Path):
+    """
+    Four-panel diagnostics figure: peak signal, off-source RMS, convergence
+    (map diff RMS), and runtime per pass.
+    """
+    labels = metrics["labels"]
+    x      = np.arange(len(labels))
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
+    fig.suptitle("CCAT Prime-Cam Iteration Diagnostics",
+                 fontsize=14, fontweight="bold")
+
+    def _line(ax, y, title, ylabel, color):
+        finite = [(i, v) for i, v in enumerate(y) if not (isinstance(v, float) and np.isnan(v))]
+        xi, yi = zip(*finite)
+        ax.plot(xi, yi, "o-", color=color, linewidth=2, markersize=7)
+        for i, v in finite:
+            ax.annotate(f"{v:.3g}", (i, v), textcoords="offset points",
+                        xytext=(0, 8), ha="center", fontsize=FONT_TICK)
+        ax.set_xticks(x)
+        ax.set_xticklabels([_pretty_title(l) for l in labels],
+                           rotation=20, ha="right", fontsize=FONT_TICK)
+        ax.set_title(title, fontsize=FONT_TITLE, fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=FONT_LABEL)
+        ax.tick_params(labelsize=FONT_TICK)
+        ax.grid(axis="y", alpha=0.3)
+
+    _line(axes[0, 0], metrics["peak"],        "Peak Signal",        "Signal",       "#c0392b")
+    _line(axes[0, 1], metrics["off_src_rms"], "Off-Source RMS",     "RMS",          "#2980b9")
+    _line(axes[1, 0], metrics["map_diff_rms"],"Convergence (Map Diff RMS)", "RMS",  "#27ae60")
+
+    # Runtime bar chart
+    ax = axes[1, 1]
+    pt_labels = [p[0] for p in pass_times]
+    pt_vals   = [p[1] for p in pass_times]
+    bars = ax.bar(pt_labels, pt_vals, color="#8e44ad", alpha=0.85)
+    for bar, val in zip(bars, pt_vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
+                f"{val:.1f}s", ha="center", va="bottom", fontsize=FONT_TICK)
+    ax.set_title("Runtime per Pass", fontsize=FONT_TITLE, fontweight="bold")
+    ax.set_ylabel("Time (s)", fontsize=FONT_LABEL)
+    ax.tick_params(axis="x", rotation=20, labelsize=FONT_TICK)
+    ax.tick_params(axis="y", labelsize=FONT_TICK)
+    ax.grid(axis="y", alpha=0.3)
+
+    plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_metadata(metadata: dict, output_dir: pathlib.Path):
+    """Write run metadata to metadata.json."""
+    output_dir = pathlib.Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_dir / "metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+    print("    Saved metadata.json")
+
+
+def _pretty_title(label: str) -> str:
+    if label == "naive":
+        return "Naive Map"
+    if label == "it_0":
+        return "Common-Mode Pass (Initial)"
+    if label.startswith("it_"):
+        n = label.split("_")[1]
+        return f"Common-Mode Pass (Iteration {n})"
+    return label.replace("_", " ").title()
+
+
+def _percentile_scale(m: np.ndarray):
+    vals = m[np.isfinite(m)]
+    vmin = np.percentile(vals, 1)
+    vmax = np.percentile(vals, 99.5)
+    if vmax == vmin:
+        vmax = vmin + 1.0
+    return vmin, vmax
+
+
+def _global_scale(maps: list[tuple[str, np.ndarray]]):
+    all_vals = np.concatenate([m[np.isfinite(m)].ravel() for _, m in maps])
+    half = max(abs(np.percentile(all_vals, 1)), abs(np.percentile(all_vals, 99.5)))
+    if half == 0:
+        half = 1.0
+    return -half, half
+
+
+def _draw_panel(ax, m, title, ra_edges, dec_edges, cmap, vmin, vmax, cbar_label):
+    extent = [ra_edges[0], ra_edges[-1], dec_edges[0], dec_edges[-1]]
+    cmap_obj = plt.cm.get_cmap(cmap).copy()
+    cmap_obj.set_bad(color="#e0e0e0")
+
+    im = ax.imshow(m, origin="lower", extent=extent, aspect="equal",
+                   cmap=cmap_obj, vmin=vmin, vmax=vmax)
+
+    valid = np.isfinite(m)
+    if valid.any():
+        rows = np.where(valid.any(axis=1))[0]
+        cols = np.where(valid.any(axis=0))[0]
+        ra_lo  = ra_edges[cols[0]]
+        ra_hi  = ra_edges[min(cols[-1] + 1, len(ra_edges) - 1)]
+        dec_lo = dec_edges[rows[0]]
+        dec_hi = dec_edges[min(rows[-1] + 1, len(dec_edges) - 1)]
+        pad_ra  = (ra_hi  - ra_lo)  * 0.05
+        pad_dec = (dec_hi - dec_lo) * 0.05
+        ax.set_xlim(ra_lo - pad_ra,  ra_hi  + pad_ra)
+        ax.set_ylim(dec_lo - pad_dec, dec_hi + pad_dec)
+
+    ax.invert_xaxis()
+    ax.set_title(title, fontsize=FONT_TITLE, fontweight="bold", pad=6)
+    ax.set_xlabel("RA (deg)", fontsize=FONT_LABEL)
+    ax.set_ylabel("Dec (deg)", fontsize=FONT_LABEL)
+    ax.tick_params(labelsize=FONT_TICK)
+    ax.xaxis.set_major_formatter(ticker.FormatStrFormatter("%.2f"))
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.2f"))
+
+    cb = plt.colorbar(im, ax=ax, shrink=0.85, pad=0.02)
+    cb.set_label(cbar_label, fontsize=FONT_LABEL)
+    cb.ax.tick_params(labelsize=FONT_TICK)
+    return im
+
+
+def _plot_overview_grid(naive: np.ndarray,
+                        cm_maps: list[tuple[str, np.ndarray]],
+                        hits: np.ndarray, noise: np.ndarray,
+                        ra_edges: np.ndarray, dec_edges: np.ndarray,
+                        filepath: pathlib.Path,
+                        sig_vmin: float, sig_vmax: float,
+                        hits_vmin: float, hits_vmax: float,
+                        noise_vmin: float, noise_vmax: float):
+    signal_maps = [("naive", naive)] + cm_maps
+    n_sig      = len(signal_maps)
+    ncols      = 4
+    n_sig_rows = math.ceil(n_sig / ncols)
+    nrows      = n_sig_rows + 1  # signal rows + hits/noise row
+
+    fig = plt.figure(figsize=(7 * ncols, 7 * nrows), constrained_layout=True)
+    fig.suptitle("CCAT Prime-Cam Quick-Look Map", fontsize=15, fontweight="bold", y=1.01)
+    gs = fig.add_gridspec(nrows, ncols)
+
+    for idx, (label, m) in enumerate(signal_maps):
+        ax = fig.add_subplot(gs[idx // ncols, idx % ncols])
+        _draw_panel(ax, m, _pretty_title(label),
+                    ra_edges, dec_edges, CMAP_SIGNAL,
+                    sig_vmin, sig_vmax, "Signal")
+
+    half = ncols // 2
+    ax_hits  = fig.add_subplot(gs[n_sig_rows, :half])
+    ax_noise = fig.add_subplot(gs[n_sig_rows, half:])
+    _draw_panel(ax_hits,  hits,  "Hit Map",   ra_edges, dec_edges,
+                CMAP_HITS, hits_vmin,  hits_vmax,  "Samples per pixel")
+    _draw_panel(ax_noise, noise, "Noise Map", ra_edges, dec_edges,
+                CMAP_HITS, noise_vmin, noise_vmax, "1 / sqrt(hits)")
+
+    plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_map(m: np.ndarray,
+              ra_edges: np.ndarray, dec_edges: np.ndarray,
+              filepath: pathlib.Path,
+              title: str = "Quick-Look Map",
+              cmap: str = CMAP_SIGNAL,
+              vmin: float = None, vmax: float = None,
+              cbar_label: str = "Signal"):
+    if vmin is None or vmax is None:
+        vmin, vmax = _percentile_scale(m)
+
+    fig, ax = plt.subplots(figsize=(7, 7), constrained_layout=True)
+    _draw_panel(ax, m, title, ra_edges, dec_edges, cmap, vmin, vmax, cbar_label)
+    fig.suptitle("CCAT Prime-Cam Quick-Look Map", fontsize=12,
+                 fontweight="bold", color="#444444", y=1.02)
+    plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)

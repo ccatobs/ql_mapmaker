@@ -83,7 +83,7 @@ def _first_pass(cfg: dict):
             det_median_sum = np.zeros(n_dets)
             det_std_sum    = np.zeros(n_dets)
         det_median_sum += np.median(chunk.signal, axis=0)
-        det_std_sum    += np.std(chunk.signal,    axis=0)
+        det_std_sum    += np.std(np.diff(chunk.signal, axis=0), axis=0)
         n_chunks += 1
 
     obs_info = dict(
@@ -128,13 +128,14 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
             n_dets      = len(chunk.kids)
             sample_rate = chunk.sample_rate
 
-        sig = chunk.signal - det_offsets[np.newaxis, :]
         ra  = chunk.ra
         dec = chunk.dec
         if keep_idx is not None:
-            sig = sig[:, keep_idx]
+            sig = chunk.signal[:, keep_idx] - det_offsets[np.newaxis, :]
             ra  = ra[:,  keep_idx]
             dec = dec[:, keep_idx]
+        else:
+            sig = chunk.signal - det_offsets[np.newaxis, :]
 
         sig = clean_tod(sig, chunk.sample_rate,
                         cosmic_rays=pipe_cfg["clean_cosmic_rays"],

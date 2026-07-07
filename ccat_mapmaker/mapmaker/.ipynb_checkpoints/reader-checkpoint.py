@@ -103,6 +103,7 @@ def _simulation_scan_to_chunk(path, det_names, det_dirs, sample_rate_ref, file_f
         n_samps = len(raw[kids[0]])
     
         boresight_q = np.asarray(frame["shared_boresight_radec"])
+        print(f"boresight_q: {boresight_q}")
     
         sig     = np.zeros((n_samps, n_dets), dtype=float)
         det_ra  = np.zeros((n_samps, n_dets), dtype=float)
@@ -144,6 +145,7 @@ def _simulation_scan_to_chunk(path, det_names, det_dirs, sample_rate_ref, file_f
             n_samps = len(raw[0])
         
             boresight_q = np.roll(np.asarray(h5_file["shared/boresight_radec"]), 1)
+            print(f"boresight_q: {boresight_q}")
         
             sig     = np.zeros((n_samps, n_dets), dtype=float)
             det_ra  = np.zeros((n_samps, n_dets), dtype=float)

@@ -27,6 +27,7 @@ import cProfile
 import pstats
 import io
 from datetime import datetime, timedelta, timezone
+import os
 
 import numpy as np
 
@@ -68,6 +69,7 @@ def _first_pass(cfg: dict):
     n_dets = sample_rate = kids = None
 
     for chunk in iter_g3_chunks(cfg):
+        print(type(chunk))
         if t_obs_start is None:
             t_obs_start = chunk.t_start
             n_dets      = chunk.signal.shape[1]
@@ -362,7 +364,7 @@ def main():
     print(f"  [{t_it0:.1f}s]")
 
     timestamp  = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    out_dir    = pathlib.Path(cfg["output"]["output_dir"]) / timestamp
+    out_dir    = os.path.join(pathlib.Path(cfg["output"]["output_dir"]), f'{cfg["output"]["obs_object"]}_d{n_dets}_{timestamp}')
     cm_maps    = [("it_0", combined_map.copy())]
     pass_times = [("naive", t_naive), ("it_0", t_it0)]
 
@@ -393,10 +395,10 @@ def main():
                                ra_edges, dec_edges, out_dir, cfg["output"])
 
     metrics = output.compute_convergence_metrics(naive, cm_maps, hits)
-    output.plot_diagnostics(metrics, pass_times, out_dir / "diagnostics.png")
+    output.plot_diagnostics(metrics, pass_times, os.path.join(out_dir, "diagnostics.png"))
     print("    Saved diagnostics.png")
 
-    output.plot_psd(raw_sample["raw"], cm_sample["cm"], sr, out_dir / "psd.png")
+    output.plot_psd(raw_sample["raw"], cm_sample["cm"], sr, os.path.join(out_dir, "psd.png"))
     print("    Saved psd.png")
 
     print("  Convergence summary:")
@@ -460,7 +462,7 @@ def main():
         flagged = output.save_per_detector_maps(
             kids_sel, det_data, det_hits,
             ra_edges, dec_edges,
-            out_dir / "per_detector",
+            os.path.join(out_dir, "per_detector"),
             pd_cfg,
         )
         metadata["detectors_to_check"] = list(flagged.keys())
@@ -482,7 +484,7 @@ def main():
         print("PROFILE -- top 30 functions by cumulative time")
         print("=" * 60)
         print(buf.getvalue())
-        prof_path = out_dir / "profile.prof"
+        prof_path = os.path.join(out_dir, "profile.prof")
         profiler.dump_stats(str(prof_path))
         print(f"Full profile : {prof_path}")
         print(f"Visualise    : snakeviz {prof_path}")

@@ -3,11 +3,12 @@
 # ============================================================
 
 [data]
-# Glob patterns expanded recursively for *.g3 files.
+# Glob patterns expanded recursively for *.g3 and *.h5 files.
 input_dirs = ["../simulation_data_from_ankur/simulation/sim_PCAM280_g3_Jupiter_d3426/Jupiter-*-*"]
 
 # "simulation" -- TOAST simulation files (quaternion pointing, compressed signal)
 # "blasttng"   -- BLAST-TNG g3 files (az/el pointing, raw I/Q) [not yet implemented]
+file_format = "g3"
 format = "simulation"
 
 
@@ -65,6 +66,7 @@ exclude_detector_indices = [] # e.g. [0, 5, 100]
 
 [output]
 output_dir = "output"
+obs_object = "jupiter"
 save_numpy = true
 save_png   = true
 

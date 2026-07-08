@@ -4,7 +4,7 @@
 
 [data]
 # Glob patterns expanded recursively for *.g3 files.
-input_dirs = ["../quick_look/simulation/sim_PCAM280_g3_Jupiter_d3426/Jupiter-*-*"]
+input_dirs = ["../simulation_data_from_ankur/simulation/sim_PCAM280_g3_Jupiter_d3426/Jupiter-*-*"]
 
 # "simulation" -- TOAST simulation files (quaternion pointing, compressed signal)
 # "blasttng"   -- BLAST-TNG g3 files (az/el pointing, raw I/Q) [not yet implemented]
@@ -21,6 +21,10 @@ dec0_deg = 15.6
 xlen_deg   = 1.0
 ylen_deg   = 1.0
 res_arcmin = 0.25
+
+# If true, run an extra boresight-only naive pass and save a side-by-side
+# comparison plot showing the effect of applying focal plane offsets.
+compare_boresight = false
 
 
 [pipeline]
@@ -39,6 +43,9 @@ chunk_duration_s = 1.0
 
 # Cosmic ray spike removal.
 clean_cosmic_rays = true
+# fill_them_noise = noisy polynomial or linear
+# how many samples (likely 5 samples)
+# build array of sample noise in loading, take varying noise everytime we need it
 
 # High-pass filter cutoff (Hz). Removes atmospheric drift.
 # Disable for simulation data -- no atmosphere, filter distorts point-source signal.
@@ -65,10 +72,12 @@ save_png   = true
 [per_detector]
 # Per-detector maps for pointing model reconstruction.
 # Each detector gets its own map; peak RA/Dec centroid saved to centroids.json.
-enabled         = true
-save_png        = true
+enabled         = false
+save_png        = false
 save_numpy      = false
 noise_threshold = 3.0    # flag detectors with off-source RMS > threshold * median RMS
+
+# Apply Offsets
 
 # Detector selection -- choose ONE of the following:
 #   max_detectors = 0               # 0 = all; N = evenly sample N detectors

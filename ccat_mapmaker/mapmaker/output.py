@@ -309,6 +309,35 @@ def plot_diagnostics(metrics: dict, pass_times: list[tuple[str, float]],
     plt.close(fig)
 
 
+def plot_boresight_comparison(with_offsets: np.ndarray, boresight_only: np.ndarray,
+                              ra_edges: np.ndarray, dec_edges: np.ndarray,
+                              filepath: pathlib.Path):
+    """
+    Side-by-side comparison of the final map (with focal plane offsets applied)
+    vs a naive map made using boresight-only pointing (no offsets).
+
+    Both panels share the same colour scale so the smearing is visually obvious.
+    """
+    all_vals = np.concatenate([with_offsets[np.isfinite(with_offsets)].ravel(),
+                               boresight_only[np.isfinite(boresight_only)].ravel()])
+    vmin = np.percentile(all_vals, 1)
+    vmax = np.percentile(all_vals, 99.5)
+    if vmax == vmin:
+        vmax = vmin + 1.0
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7), constrained_layout=True)
+    fig.suptitle("CCAT Prime-Cam: Effect of Focal Plane Offsets",
+                 fontsize=14, fontweight="bold")
+
+    _draw_panel(axes[0], with_offsets,  "With Focal Plane Offsets",
+                ra_edges, dec_edges, CMAP_SIGNAL, vmin, vmax, "Signal")
+    _draw_panel(axes[1], boresight_only, "Boresight-Only (no offsets)",
+                ra_edges, dec_edges, CMAP_SIGNAL, vmin, vmax, "Signal")
+
+    plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
 def save_metadata(metadata: dict, output_dir: pathlib.Path):
     """Write run metadata to metadata.json."""
     output_dir = pathlib.Path(output_dir)

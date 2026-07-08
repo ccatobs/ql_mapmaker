@@ -58,11 +58,13 @@ def _first_pass(cfg: dict):
     Single streaming pass to compute per-detector baselines, noise, and mean boresight.
 
     Uses the median of each chunk's signal (averaged across chunks) for the
-    baseline -- robust to cosmic ray tails. Also accumulates per-detector std
-    for auto-exclusion of noisy detectors.
+    baseline -- robust to cosmic ray tails. Computes per-detector noise as the
+    true global std of first-differences by accumulating sum and sum-of-squares
+    across all chunks before computing the final statistic.
     """
     ra_sum = dec_sum = n_bore = 0
-    det_median_sum = det_std_sum = None
+    det_median_sum = det_diff_sum = det_diff_sum_sq = None
+    det_diff_count = 0
     n_chunks = 0
     t_obs_start = t_obs_stop = None
     n_dets = sample_rate = kids = None
@@ -80,10 +82,14 @@ def _first_pass(cfg: dict):
         n_bore  += len(chunk.ra_bore)
 
         if det_median_sum is None:
-            det_median_sum = np.zeros(n_dets)
-            det_std_sum    = np.zeros(n_dets)
-        det_median_sum += np.median(chunk.signal, axis=0)
-        det_std_sum    += np.std(np.diff(chunk.signal, axis=0), axis=0)
+            det_median_sum   = np.zeros(n_dets)
+            det_diff_sum     = np.zeros(n_dets)
+            det_diff_sum_sq  = np.zeros(n_dets)
+        det_median_sum  += np.median(chunk.signal, axis=0)
+        diffs            = chunk.signal[1:] - chunk.signal[:-1]
+        det_diff_sum    += diffs.sum(axis=0)
+        det_diff_sum_sq += (diffs ** 2).sum(axis=0)
+        det_diff_count  += len(diffs)
         n_chunks += 1
 
     obs_info = dict(
@@ -94,7 +100,10 @@ def _first_pass(cfg: dict):
         sample_rate_hz = sample_rate,
         n_chunks       = n_chunks,
     )
-    det_noise = det_std_sum / n_chunks
+    det_noise = np.sqrt(np.clip(
+        det_diff_sum_sq / det_diff_count - (det_diff_sum / det_diff_count) ** 2,
+        0, None
+    ))
     return ra_sum / n_bore, dec_sum / n_bore, det_median_sum / n_chunks, det_noise, kids, obs_info
 
 
@@ -104,7 +113,8 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                     current_map: np.ndarray = None,
                     common_mode: bool = True,
                     return_sample: bool = False,
-                    keep_idx: np.ndarray = None):
+                    keep_idx: np.ndarray = None,
+                    boresight_only: bool = False):
     """
     One streaming pass over all chunks: baseline subtract, clean, optionally
     common-mode subtract, then bin into the map accumulator.
@@ -136,6 +146,10 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
             dec = dec[:, keep_idx]
         else:
             sig = chunk.signal - det_offsets[np.newaxis, :]
+
+        if boresight_only:
+            ra  = np.repeat(chunk.ra_bore[:, np.newaxis], sig.shape[1], axis=1)
+            dec = np.repeat(chunk.dec_bore[:, np.newaxis], sig.shape[1], axis=1)
 
         sig = clean_tod(sig, chunk.sample_rate,
                         cosmic_rays=pipe_cfg["clean_cosmic_rays"],
@@ -241,8 +255,8 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
         for j, i in enumerate(sel_idx):
             d, h = bin_detector(sig[:, i], chunk.ra[:, i], chunk.dec[:, i],
                                 ra_edges, dec_edges)
-            det_data[j] += d.astype(np.float32)
-            det_hits[j] += h.astype(np.float32)
+            det_data[j] += d
+            det_hits[j] += h
 
     return kids_sel, det_data, det_hits
 
@@ -446,7 +460,22 @@ def main():
     output.save_metadata(metadata, out_dir)
 
     # ------------------------------------------------------------------ #
-    # STEP 5: Per-detector maps (optional)
+    # STEP 5: Boresight comparison map (optional)
+    # ------------------------------------------------------------------ #
+    if cfg["map"].get("compare_boresight", False):
+        print("\nStep 5: Boresight-only comparison pass...")
+        t = time.perf_counter()
+        bore_map, _, _, _, _ = _streaming_pass(
+            cfg, pipe_cfg, ra_edges, dec_edges, det_offsets_kept,
+            common_mode=False, boresight_only=True, keep_idx=keep_idx)
+        print(f"  [{time.perf_counter() - t:.1f}s]")
+        output.plot_boresight_comparison(
+            combined_map, bore_map, ra_edges, dec_edges,
+            out_dir / "boresight_comparison.png")
+        print("  Saved boresight_comparison.png")
+
+    # ------------------------------------------------------------------ #
+    # STEP 6: Per-detector maps (optional)
     # ------------------------------------------------------------------ #
     pd_cfg = cfg.get("per_detector", {})
     if pd_cfg.get("enabled", False):

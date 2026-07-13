@@ -39,7 +39,8 @@ def make_map_edges(ra0_deg: float, dec0_deg: float,
 # and Jonah Lee, https://github.com/jonahjlee/blasttng-to-g3, maps.py, MapBinner.__call__
 def bin_detector(tod_1d: np.ndarray,
                  ra_1d: np.ndarray, dec_1d: np.ndarray,
-                 ra_edges: np.ndarray, dec_edges: np.ndarray):
+                 ra_edges: np.ndarray, dec_edges: np.ndarray,
+                 dtype=np.float32):
     """
     Bin one detector's timestream into a 2-D pixel map.
 
@@ -47,15 +48,18 @@ def bin_detector(tod_1d: np.ndarray,
     per pixel (data), once without to get sample count per pixel (hits).
     Dividing data by hits gives the average signal per pixel.
 
-    Returns data and hits, both shape (ny, nx). Dec is the first dimension
-    following histogram2d's (row, col) = (Dec, RA) convention.
+    Returns data and hits, both shape (ny, nx), cast to dtype. Dec is the
+    first dimension following histogram2d's (row, col) = (Dec, RA) convention.
+    histogram2d produces float64 internally; dtype controls the output precision.
+    float32 halves memory vs float64. float16 can be tried for further savings
+    but risks overflow/precision loss on accumulated maps.
     """
     data, _, _ = np.histogram2d(dec_1d, ra_1d,
                                 bins=[dec_edges, ra_edges],
                                 weights=tod_1d)
     hits, _, _ = np.histogram2d(dec_1d, ra_1d,
                                 bins=[dec_edges, ra_edges])
-    return data, hits
+    return data.astype(dtype), hits.astype(dtype)
 
 
 def bin_chunk(signal: np.ndarray,

@@ -6,8 +6,9 @@ __pycache__/
 
 ccat_mapmaker_AY/
 ccat_mapmaker/output/
+ccat_mapmaker/notebooks/
 external/
 initial_readings/
 logbook.md
-quick_look/
+paper/
 simulation_data_from_ankur/

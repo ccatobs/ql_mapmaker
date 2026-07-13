@@ -48,7 +48,7 @@ def boresight_to_radec(boresight_q: np.ndarray) -> tuple:
     ----------
     boresight_q : (n_samps, 4), scalar-first (w, x, y, z).
     """
-    # Reorder w,x,y,z → x,y,z,w to match scipy's convention
+    # Reorder w,x,y,z -> x,y,z,w to match scipy's convention
     boresight_r = Rotation.from_quat(boresight_q[:, [1, 2, 3, 0]])
     ra, dec = _pointing_to_radec(boresight_r.apply(_Z_AXIS))
     return ra, dec, boresight_r
@@ -65,15 +65,3 @@ def det_radec_from_boresight(boresight_r, det_dir: np.ndarray) -> tuple:
     det_dir     : (3,) precomputed direction from precompute_det_directions.
     """
     return _pointing_to_radec(boresight_r.apply(det_dir))
-
-
-# Adapted from Bonnie Slocombe, external/g3_mapmaking/mapmaker/g3mapmaker.py
-# Not used in the pipeline,  superseded by boresight_to_radec +
-# det_radec_from_boresight. Kept as reference for the original approach.
-def quaternion_to_radec(boresight_q: np.ndarray, det_q: np.ndarray):
-    # Reorder boresight: TOAST scalar-first (w,x,y,z) → scipy vector-first (x,y,z,w)
-    boresight_r = Rotation.from_quat(boresight_q[:, [1, 2, 3, 0]])
-    det_r       = Rotation.from_quat(det_q)  # focalplane file is already vector-first
-    combined_r  = boresight_r * det_r
-    z_axis      = np.array([0.0, 0.0, 1.0])
-    return _pointing_to_radec(combined_r.apply(z_axis))

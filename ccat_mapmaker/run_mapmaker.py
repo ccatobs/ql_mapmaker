@@ -71,7 +71,6 @@ def _first_pass(cfg: dict):
     n_dets = sample_rate = kids = None
 
     for chunk in iter_g3_chunks(cfg):
-        print(type(chunk))
         if t_obs_start is None:
             t_obs_start = chunk.t_start
             n_dets      = chunk.signal.shape[1]
@@ -116,7 +115,8 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                     common_mode: bool = True,
                     return_sample: bool = False,
                     keep_idx: np.ndarray = None,
-                    boresight_only: bool = False):
+                    boresight_only: bool = False,
+                    collect_tod_rms: bool = False):
     """
     One streaming pass over all chunks: baseline subtract, clean, optionally
     common-mode subtract, then bin into the map accumulator.
@@ -126,6 +126,8 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
     common_mode: if False, skips common-mode subtraction entirely (naive map).
     return_sample: if True, captures the first chunk's signal before and after
                    CM subtraction for PSD diagnostics.
+    collect_tod_rms: if True, records median detector RMS per chunk before and
+                     after CM subtraction as a list of (t_start, rms_raw, rms_cm).
     """
     ny = len(dec_edges) - 1
     nx = len(ra_edges)  - 1
@@ -134,6 +136,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
 
     n_dets = sample_rate = None
     psd_raw = psd_cm = None
+    tod_rms_data: list = []
 
     for chunk in iter_g3_chunks(cfg):
         if n_dets is None:
@@ -160,6 +163,9 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
         if return_sample and psd_raw is None:
             psd_raw = sig.copy()
 
+        if collect_tod_rms:
+            rms_raw = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0))))
+
         if common_mode:
             if current_map is not None:
                 sig = iterate_common_mode(sig, ra, dec,
@@ -170,6 +176,10 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
         if return_sample and psd_cm is None:
             psd_cm = sig.copy()
 
+        if collect_tod_rms:
+            rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
+            tod_rms_data.append((chunk.t_start, rms_raw, rms_cm))
+
         d, h = bin_chunk(sig, ra, dec, ra_edges, dec_edges)
         total_data += d
         total_hits += h
@@ -178,7 +188,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
         combined = np.where(total_hits > 0, total_data / total_hits, np.nan)
 
     sample = {"raw": psd_raw, "cm": psd_cm} if return_sample else None
-    return combined, total_hits, n_dets, sample_rate, sample
+    return combined, total_hits, n_dets, sample_rate, sample, tod_rms_data
 
 
 def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarray]:
@@ -363,7 +373,7 @@ def main():
     chunk_s     = pipe_cfg.get("chunk_duration_s", 1.0)
     t = time.perf_counter()
     print(f"Step 2: Naive map (chunk_duration_s={chunk_s})...")
-    naive, _, n_dets, sr, raw_sample = _streaming_pass(
+    naive, _, n_dets, sr, raw_sample, _ = _streaming_pass(
         cfg, pipe_cfg, ra_edges, dec_edges, det_offsets_kept,
         common_mode=False, return_sample=True, keep_idx=keep_idx)
     t_naive = time.perf_counter() - t
@@ -371,9 +381,9 @@ def main():
 
     t = time.perf_counter()
     print("Step 2: Initial common-mode pass...")
-    combined_map, hits, _, _, cm_sample = _streaming_pass(
+    combined_map, hits, _, _, cm_sample, tod_rms_data = _streaming_pass(
         cfg, pipe_cfg, ra_edges, dec_edges, det_offsets_kept,
-        return_sample=True, keep_idx=keep_idx)
+        return_sample=True, keep_idx=keep_idx, collect_tod_rms=True)
     t_it0 = time.perf_counter() - t
     print(f"  [{t_it0:.1f}s]")
 
@@ -391,7 +401,7 @@ def main():
         for i in range(1, n_iters + 1):
             t = time.perf_counter()
             print(f"  Iteration {i}/{n_iters}...", end=" ", flush=True)
-            combined_map, hits, _, _, _ = _streaming_pass(
+            combined_map, hits, _, _, _, _ = _streaming_pass(
                 cfg, pipe_cfg, ra_edges, dec_edges, det_offsets_kept,
                 current_map=combined_map, keep_idx=keep_idx,
             )
@@ -414,6 +424,9 @@ def main():
 
     output.plot_psd(raw_sample["raw"], cm_sample["cm"], sr, os.path.join(out_dir, "psd.png"))
     print("    Saved psd.png")
+
+    output.plot_tod_rms(tod_rms_data, os.path.join(out_dir, "tod_rms.png"))
+    print("    Saved tod_rms.png")
 
     print("  Convergence summary:")
     for label, peak, rms, diff in zip(
@@ -467,7 +480,7 @@ def main():
     if cfg["map"].get("compare_boresight", False):
         print("\nStep 5: Boresight-only comparison pass...")
         t = time.perf_counter()
-        bore_map, _, _, _, _ = _streaming_pass(
+        bore_map, _, _, _, _, _ = _streaming_pass(
             cfg, pipe_cfg, ra_edges, dec_edges, det_offsets_kept,
             common_mode=False, boresight_only=True, keep_idx=keep_idx)
         print(f"  [{time.perf_counter() - t:.1f}s]")

@@ -33,7 +33,7 @@ import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from mapmaker.reader      import iter_g3_chunks
+from mapmaker.reader      import iter_chunks
 from mapmaker.cleaning    import clean_tod
 from mapmaker.binning     import make_map_edges, bin_chunk, bin_detector
 from mapmaker.common_mode import estimate_common_mode, subtract_common_mode, iterate_common_mode
@@ -70,12 +70,20 @@ def _first_pass(cfg: dict):
     t_obs_start = t_obs_stop = None
     n_dets = sample_rate = kids = None
 
-    for chunk in iter_g3_chunks(cfg):
+    for chunk in iter_chunks(cfg):
+        flags = chunk.flags
+        chunk_id = chunk.chunk_index
+        if np.mean(flags) == 1:
+            print(f"No good data in chunk with index {chunk_id}. Skipping to next chunk")
+            continue
+        flag_mask = np.ones(np.shape(flags))
+        flag_mask[flags == 1] = np.nan
         if t_obs_start is None:
             t_obs_start = chunk.t_start
             n_dets      = chunk.signal.shape[1]
             sample_rate = chunk.sample_rate
             kids        = chunk.kids
+
         t_obs_stop = chunk.t_stop
 
         ra_sum  += chunk.ra_bore.sum()
@@ -86,10 +94,10 @@ def _first_pass(cfg: dict):
             det_median_sum   = np.zeros(n_dets)
             det_diff_sum     = np.zeros(n_dets)
             det_diff_sum_sq  = np.zeros(n_dets)
-        det_median_sum  += np.median(chunk.signal, axis=0)
-        diffs            = chunk.signal[1:] - chunk.signal[:-1]
-        det_diff_sum    += diffs.sum(axis=0)
-        det_diff_sum_sq += (diffs ** 2).sum(axis=0)
+        det_median_sum  += np.nanmedian(chunk.signal*flag_mask, axis=0)
+        diffs            = chunk.signal[1:]*flag_mask[1:] - chunk.signal[:-1]*flag_mask[:-1]
+        det_diff_sum    += diffs.nansum(axis=0)
+        det_diff_sum_sq += (diffs ** 2).nansum(axis=0)
         det_diff_count  += len(diffs)
         n_chunks += 1
 
@@ -137,16 +145,24 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
     n_dets = sample_rate = None
     psd_raw = psd_cm = None
     tod_rms_data: list = []
-
-    for chunk in iter_g3_chunks(cfg):
+    for chunk in iter_chunks(cfg):
+        flags = chunk.flags
+        chunk_id = chunk.chunk_index
+        if np.mean(flags) == 1:
+            # print(f"No good data in chunk with index {chunk_id}. Skipping to next chunk")
+            continue
         if n_dets is None:
             n_dets      = len(chunk.kids)
             sample_rate = chunk.sample_rate
 
         ra  = chunk.ra
         dec = chunk.dec
+        flags = chunk.flags
+        flag_mask = np.ones(np.shape(flags))
+        flag_mask[flags == 1] = np.nan
+        
         if keep_idx is not None:
-            sig = chunk.signal[:, keep_idx] - det_offsets[np.newaxis, :]
+            sig = (chunk.signal[:, keep_idx] - det_offsets[np.newaxis, :])
             ra  = ra[:,  keep_idx]
             dec = dec[:, keep_idx]
         else:
@@ -160,6 +176,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                         cosmic_rays=pipe_cfg["clean_cosmic_rays"],
                         highpass_hz=pipe_cfg["highpass_cutoff_hz"])
 
+
         if return_sample and psd_raw is None:
             psd_raw = sig.copy()
 
@@ -168,19 +185,19 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
 
         if common_mode:
             if current_map is not None:
-                sig = iterate_common_mode(sig, ra, dec,
+                sig = iterate_common_mode(sig, flag_mask, ra, dec,
                                           current_map, ra_edges, dec_edges)
             else:
-                sig = subtract_common_mode(sig, estimate_common_mode(sig))
+                sig = subtract_common_mode(sig, estimate_common_mode(sig, flag_mask))
 
         if return_sample and psd_cm is None:
-            psd_cm = sig.copy()
+            psd_cm = sig.copy() * flag_mask
 
         if collect_tod_rms:
             rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
             tod_rms_data.append((chunk.t_start, rms_raw, rms_cm))
 
-        d, h = bin_chunk(sig, ra, dec, ra_edges, dec_edges)
+        d, h = bin_chunk(sig, flag_mask, ra, dec, ra_edges, dec_edges)
         total_data += d
         total_hits += h
 
@@ -250,22 +267,26 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
     kids_sel = sel_idx = None
     det_data = det_hits = None
 
-    for chunk in iter_g3_chunks(cfg):
+    for chunk in iter_chunks(cfg):
         if kids_sel is None:
             kids_sel, sel_idx = _resolve_det_selection(chunk.kids, pd_cfg)
-            n_sel    = len(kids_sel)
-            det_data = np.zeros((n_sel, ny, nx), dtype=np.float32)
-            det_hits = np.zeros((n_sel, ny, nx), dtype=np.float32)
+            n_sel     = len(kids_sel)
+            det_data  = np.zeros((n_sel, ny, nx), dtype=np.float32)
+            det_hits  = np.zeros((n_sel, ny, nx), dtype=np.float32)
 
+        flags = chunk.flags
+        flag_mask = np.ones(np.shape(flags))
+        flag_mask[flags == 1] = np.nan
         sig = chunk.signal - det_offsets[np.newaxis, :]
-        sig = clean_tod(sig, chunk.sample_rate,
+        
+        sig = clean_tod(sig, flag_mask, chunk.sample_rate,
                         cosmic_rays=pipe_cfg["clean_cosmic_rays"],
                         highpass_hz=pipe_cfg["highpass_cutoff_hz"])
-        sig = iterate_common_mode(sig, chunk.ra, chunk.dec,
+        sig = iterate_common_mode(sig, flag_mask, chunk.ra, chunk.dec,
                                   final_map, ra_edges, dec_edges)
 
         for j, i in enumerate(sel_idx):
-            d, h = bin_detector(sig[:, i], chunk.ra[:, i], chunk.dec[:, i],
+            d, h = bin_detector(sig[:, i], flag_mask[:, i], chunk.ra[:, i], chunk.dec[:, i],
                                 ra_edges, dec_edges)
             det_data[j] += d
             det_hits[j] += h

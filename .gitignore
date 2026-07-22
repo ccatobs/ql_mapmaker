@@ -6,7 +6,8 @@ __pycache__/
 
 ccat_mapmaker_AY/
 ccat_mapmaker/output/
-ccat_mapmaker/notebooks/
+ccat_mapmaker/notebooks/*
+!ccat_mapmaker/notebooks/pointing_reconstruction.ipynb
 external/
 initial_readings/
 logbook.md

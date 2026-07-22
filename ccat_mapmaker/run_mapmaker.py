@@ -234,23 +234,32 @@ def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarr
 
 def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
                        ra_edges: np.ndarray, dec_edges: np.ndarray,
-                       det_offsets: np.ndarray, final_map: np.ndarray):
+                       det_offsets: np.ndarray):
     """
     One streaming pass accumulating a separate signal map for each detector.
 
-    Uses sky-informed common-mode subtraction (iterate_common_mode) with the
-    final combined map as the sky estimate. Detector maps are accumulated as
-    float32 to limit memory usage.
+    No common-mode subtraction here: per-detector maps are used for pointing
+    reconstruction, PSDs, and flagging, which need each detector's own raw
+    noise characteristics rather than a common-mode-cleaned residual.
+
+    If pd_cfg["apply_offsets"] is False, detector offsets are not applied
+    (see iter_g3_chunks); every detector is instead binned against the shared
+    boresight sky position (chunk.ra_bore/dec_bore), since offsets aren't
+    known/trusted yet. Interpreting those centroids as focal-plane offsets
+    is done offline, not here.
+
+    Detector maps are accumulated as float32 to limit memory usage.
 
     Returns (kids, det_data, det_hits) where det_data/hits are (n_sel, ny, nx).
     """
     ny = len(dec_edges) - 1
     nx = len(ra_edges)  - 1
 
+    apply_offsets = pd_cfg.get("apply_offsets", True)
     kids_sel = sel_idx = None
     det_data = det_hits = None
 
-    for chunk in iter_g3_chunks(cfg):
+    for chunk in iter_g3_chunks(cfg, apply_offsets=apply_offsets):
         if kids_sel is None:
             kids_sel, sel_idx = _resolve_det_selection(chunk.kids, pd_cfg)
             n_sel    = len(kids_sel)
@@ -261,12 +270,13 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
         sig = clean_tod(sig, chunk.sample_rate,
                         cosmic_rays=pipe_cfg["clean_cosmic_rays"],
                         highpass_hz=pipe_cfg["highpass_cutoff_hz"])
-        sig = iterate_common_mode(sig, chunk.ra, chunk.dec,
-                                  final_map, ra_edges, dec_edges)
 
         for j, i in enumerate(sel_idx):
-            d, h = bin_detector(sig[:, i], chunk.ra[:, i], chunk.dec[:, i],
-                                ra_edges, dec_edges)
+            if apply_offsets:
+                ra, dec = chunk.ra[:, i], chunk.dec[:, i]
+            else:
+                ra, dec = chunk.ra_bore, chunk.dec_bore
+            d, h = bin_detector(sig[:, i], ra, dec, ra_edges, dec_edges)
             det_data[j] += d
             det_hits[j] += h
 
@@ -498,7 +508,6 @@ def main():
         t = time.perf_counter()
         kids_sel, det_data, det_hits = _per_detector_pass(
             cfg, pipe_cfg, pd_cfg, ra_edges, dec_edges, det_offsets,
-            final_map=combined_map,
         )
         print(f"  Pass complete [{time.perf_counter() - t:.1f}s]")
         flagged = output.save_per_detector_maps(

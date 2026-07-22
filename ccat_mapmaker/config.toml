@@ -35,8 +35,8 @@ n_iterations = 4
 
 # Time window: skip start_offset_s seconds, then process max_duration_s seconds.
 # Comment out max_duration_s to process the full observation.
-start_offset_s = 150
-max_duration_s = 100
+start_offset_s = 0
+#max_duration_s = 0
 
 # Chunk duration in seconds. Smaller = less memory, larger = better common-mode estimate.
 # 0 or negative = one chunk per G3 frame.
@@ -74,12 +74,14 @@ save_png   = true
 [per_detector]
 # Per-detector maps for pointing model reconstruction.
 # Each detector gets its own map; peak RA/Dec centroid saved to centroids.json.
-enabled         = false
+enabled         = true
 save_png        = false
-save_numpy      = false
+save_numpy      = true
 noise_threshold = 3.0    # flag detectors with off-source RMS > threshold * median RMS
 
-# Apply Offsets
+apply_offsets   = false    # false = bin against shared boresight ra_bore/dec_bore, no per-detector
+                           # offset applied (offsets not known/trusted yet); centroids.json then
+                           # records where the boresight was pointing at each detector's peak,
 
 # Detector selection -- choose ONE of the following:
 #   max_detectors = 0               # 0 = all; N = evenly sample N detectors

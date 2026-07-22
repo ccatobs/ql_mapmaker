@@ -4,11 +4,12 @@
 
 [data]
 # Glob patterns expanded recursively for *.g3 and *.h5 files.
-input_dirs = ["../simulation_data_from_ankur/simulation/sim_PCAM280_g3_Jupiter_d3426/Jupiter-*-*"]
+
+input_dirs = ["/projects/ccat/prime-cam/vgrecu_tests/primecam_sims_planetobs/ccat_datacenter_mock/mockdata/planet_ATMdata_d100/sim_PCAM280_h5_Jupiter_d100/Jupiter-*-*"]
 
 # "simulation" -- TOAST simulation files (quaternion pointing, compressed signal)
 # "blasttng"   -- BLAST-TNG g3 files (az/el pointing, raw I/Q) [not yet implemented]
-file_format = "g3"
+file_format = "h5"
 format = "simulation"
 
 

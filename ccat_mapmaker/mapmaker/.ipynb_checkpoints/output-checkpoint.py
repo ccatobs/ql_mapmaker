@@ -51,10 +51,12 @@ def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarra
 
         with np.errstate(invalid="ignore", divide="ignore"):
             m = np.where(hits > 0, data / hits, np.nan)
-
+        if np.isnan(np.nanmean(m)) == True:
+            continue
         peak_snr = float("nan")
         peak_ra  = float("nan")
         peak_dec = float("nan")
+        noise    = float("nan")
         if np.any(np.isfinite(m)):
             flat_idx        = np.nanargmax(m)
             iy, ix          = np.unravel_index(flat_idx, m.shape)
@@ -196,13 +198,15 @@ def compute_convergence_metrics(naive: np.ndarray,
     valid      = hits > 0
     threshold  = np.nanpercentile(final_map[valid], 50)
     off_source = valid & (final_map < threshold)
+    on_source = valid & (final_map >= threshold)
 
-    labels, peaks, rms_vals, diff_rms = [], [], [], []
+    labels, peaks, rms_vals_off, rms_vals_on, diff_rms = [], [], [], [], []
     prev = None
     for label, m in all_maps:
         labels.append(label)
         peaks.append(float(np.nanmax(m)))
-        rms_vals.append(float(np.sqrt(np.nanmean(m[off_source] ** 2))))
+        rms_vals_off.append(float(np.sqrt(np.nanmean(m[off_source] ** 2))))
+        rms_vals_on.append(float(np.sqrt(np.nanmean(m[on_source] ** 2))))
         if prev is None:
             diff_rms.append(float("nan"))
         else:
@@ -210,8 +214,38 @@ def compute_convergence_metrics(naive: np.ndarray,
             diff_rms.append(float(np.sqrt(np.nanmean(diff[valid] ** 2))))
         prev = m
 
-    return dict(labels=labels, peak=peaks, off_src_rms=rms_vals, map_diff_rms=diff_rms)
+    return dict(labels=labels, peak=peaks, off_src_rms=rms_vals_off, on_src_rms=rms_vals_on, map_diff_rms=diff_rms)
 
+
+def plot_tod_rms(tod_rms_data: list, filepath: pathlib.Path):
+    """
+    Plot median detector RMS per chunk vs elapsed time through the observation.
+
+    Shows whether noise is stationary. Each point is one chunk; two lines show
+    the noise level before and after common-mode subtraction.
+    tod_rms_data : list of (t_start, rms_raw, rms_cm) from _streaming_pass.
+    """
+    if not tod_rms_data:
+        return
+
+    t0      = tod_rms_data[0][0]
+    t_vals  = [d[0] - t0 for d in tod_rms_data]
+    rms_raw = [d[1] for d in tod_rms_data]
+    rms_cm  = [d[2] for d in tod_rms_data]
+
+    fig, ax = plt.subplots(figsize=(10, 4), constrained_layout=True)
+    ax.plot(t_vals, rms_raw, color="#e74c3c", linewidth=1.2, label="Before CM subtraction")
+    ax.plot(t_vals, rms_cm,  color="#2980b9", linewidth=1.2, label="After CM subtraction")
+    ax.set_xlabel("Time from obs start (s)", fontsize=FONT_LABEL)
+    ax.set_ylabel("Median detector RMS", fontsize=FONT_LABEL)
+    ax.set_title("TOD RMS vs Time", fontsize=FONT_TITLE, fontweight="bold")
+    ax.tick_params(labelsize=FONT_TICK)
+    ax.legend(fontsize=FONT_TICK)
+    ax.grid(alpha=0.3)
+    fig.suptitle("CCAT Prime-Cam Quick-Look Diagnostic",
+                 fontsize=12, fontweight="bold", color="#444444", y=1.02)
+    plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
 
 def plot_psd(raw_tod: np.ndarray, cleaned_tod: np.ndarray,
              sample_rate: float, filepath: pathlib.Path,
@@ -290,20 +324,50 @@ def plot_diagnostics(metrics: dict, pass_times: list[tuple[str, float]],
     _line(axes[0, 0], metrics["peak"],        "Peak Signal",        "Signal",       "#c0392b")
     _line(axes[0, 1], metrics["off_src_rms"], "Off-Source RMS",     "RMS",          "#2980b9")
     _line(axes[1, 0], metrics["map_diff_rms"],"Convergence (Map Diff RMS)", "RMS",  "#27ae60")
+    _line(axes[1, 1], metrics["on_src_rms"],  "On-Source RMS",      "RMS",          "#e67e22")
 
     # Runtime bar chart
-    ax = axes[1, 1]
-    pt_labels = [p[0] for p in pass_times]
-    pt_vals   = [p[1] for p in pass_times]
-    bars = ax.bar(pt_labels, pt_vals, color="#8e44ad", alpha=0.85)
-    for bar, val in zip(bars, pt_vals):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
-                f"{val:.1f}s", ha="center", va="bottom", fontsize=FONT_TICK)
-    ax.set_title("Runtime per Pass", fontsize=FONT_TITLE, fontweight="bold")
-    ax.set_ylabel("Time (s)", fontsize=FONT_LABEL)
-    ax.tick_params(axis="x", rotation=20, labelsize=FONT_TICK)
-    ax.tick_params(axis="y", labelsize=FONT_TICK)
-    ax.grid(axis="y", alpha=0.3)
+    # ax = axes[1, 1]
+    # pt_labels = [p[0] for p in pass_times]
+    # pt_vals   = [p[1] for p in pass_times]
+    # bars = ax.bar(pt_labels, pt_vals, color="#8e44ad", alpha=0.85)
+    # for bar, val in zip(bars, pt_vals):
+    #     ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
+    #             f"{val:.1f}s", ha="center", va="bottom", fontsize=FONT_TICK)
+    # ax.set_title("Runtime per Pass", fontsize=FONT_TITLE, fontweight="bold")
+   # ax.set_ylabel("Time (s)", fontsize=FONT_LABEL)
+    # ax.tick_params(axis="x", rotation=20, labelsize=FONT_TICK)
+   # ax.tick_params(axis="y", labelsize=FONT_TICK)
+   # ax.grid(axis="y", alpha=0.3)
+
+    plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_boresight_comparison(with_offsets: np.ndarray, boresight_only: np.ndarray,
+                              ra_edges: np.ndarray, dec_edges: np.ndarray,
+                              filepath: pathlib.Path):
+    """
+    Side-by-side comparison of the final map (with focal plane offsets applied)
+    vs a naive map made using boresight-only pointing (no offsets).
+
+    Both panels share the same colour scale so the smearing is visually obvious.
+    """
+    all_vals = np.concatenate([with_offsets[np.isfinite(with_offsets)].ravel(),
+                               boresight_only[np.isfinite(boresight_only)].ravel()])
+    vmin = np.percentile(all_vals, 1)
+    vmax = np.percentile(all_vals, 99.5)
+    if vmax == vmin:
+        vmax = vmin + 1.0
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7), constrained_layout=True)
+    fig.suptitle("CCAT Prime-Cam: Effect of Focal Plane Offsets",
+                 fontsize=14, fontweight="bold")
+
+    _draw_panel(axes[0], with_offsets,  "With Focal Plane Offsets",
+                ra_edges, dec_edges, CMAP_SIGNAL, vmin, vmax, "Signal")
+    _draw_panel(axes[1], boresight_only, "Boresight-Only (no offsets)",
+                ra_edges, dec_edges, CMAP_SIGNAL, vmin, vmax, "Signal")
 
     plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
     plt.close(fig)

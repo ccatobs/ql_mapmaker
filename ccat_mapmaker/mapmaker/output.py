@@ -51,10 +51,12 @@ def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarra
 
         with np.errstate(invalid="ignore", divide="ignore"):
             m = np.where(hits > 0, data / hits, np.nan)
-
+        if np.isnan(np.nanmean(m)) == True:
+            continue
         peak_snr = float("nan")
         peak_ra  = float("nan")
         peak_dec = float("nan")
+        noise    = float("nan")
         if np.any(np.isfinite(m)):
             flat_idx        = np.nanargmax(m)
             iy, ix          = np.unravel_index(flat_idx, m.shape)

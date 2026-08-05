@@ -7,9 +7,22 @@
 input_dirs = ["/projects/ccat/prime-cam/vgrecu_tests/primecam_sims_planetobs/ccat_datacenter_mock/mockdata/planet_ATMdata_d100/sim_PCAM280_h5_Jupiter_d100/Jupiter-*-*"]
 
 # "simulation" -- TOAST simulation files (quaternion pointing, compressed signal)
-# "blasttng"   -- BLAST-TNG g3 files (az/el pointing, raw I/Q) [not yet implemented]
+# "blasttng"   -- BLAST-TNG g3 files (raw I/Q -> df via signal.py; ra/dec assumed
+#                 already computed upstream, e.g. by blasttng-to-g3's add_radec_so3g)
 file_format = "h5"
 format = "simulation"
+
+
+[blasttng]
+# Only used when [data] format = "blasttng".
+iq_key            = "data"           # G3SuperTimestream key for raw I/Q in scan frames
+target_sweeps_key = "target_sweeps"  # G3TimestreamMap key for calibration sweeps in the calibration frame
+
+# "hybrid" -- fast gradient method near resonance, falls back to the accurate
+#             IQ-angle method further out (see mapmaker/signal.py)
+# "angle"  -- always use the accurate (slower) IQ-angle method
+df_method = "hybrid"
+threshold_frac = 0.05   # iq_to_df_hybrid: fraction of sweep bandwidth beyond which fallback triggers
 
 
 [map]

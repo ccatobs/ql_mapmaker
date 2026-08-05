@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from spt3g import core
 
 from .pointing import precompute_det_directions, boresight_to_radec, det_radec_from_boresight
+from .signal import iq_to_df, iq_to_df_hybrid
 
 
 @dataclass
@@ -307,6 +308,117 @@ def _iter_simulation_chunks(files: list, file_fmt: str, apply_offsets: bool = Tr
                 path, det_names, det_dirs, sample_rate_ref, file_fmt, apply_offsets
             )
 
+# ── Real BLAST-TNG format helpers ────────────────────────────────────────────
+#
+# Raw I/Q + calibration sweeps -> df, via signal.iq_to_df / iq_to_df_hybrid.
+# ra/dec are assumed already computed upstream (e.g. blasttng-to-g3's
+# add_radec_so3g) and read directly from the frame -- no az/el astrometry
+# happens here. Per-detector focal-plane offsets aren't known yet, so
+# chunk.ra/dec (per-detector) always come back None for this format; only
+# boresight pointing (ra_bore/dec_bore) is populated.
+
+def _load_blasttng_calibration(frame, target_sweeps_key: str = "target_sweeps"):
+    """
+    Extract detector names and calibration sweep data from a calibration frame.
+
+    Target sweeps are stored as a G3TimestreamMap with keys "<kid>_I",
+    "<kid>_Q", "<kid>_F" for each detector's calibration sweep -- same
+    convention as external/blasttng-to-g3's g3_utils/signal.py.
+
+    Returns
+    -------
+    kids          : list of str
+    target_sweeps : dict {kid: (If, Qf, Ff) arrays}
+    """
+    target_sweeps_map = frame[target_sweeps_key]
+    kids = sorted({name[:-2] for name in target_sweeps_map.keys()})
+
+    target_sweeps = {}
+    for kid in kids:
+        If = np.array(target_sweeps_map[f"{kid}_I"])
+        Qf = np.array(target_sweeps_map[f"{kid}_Q"])
+        Ff = np.array(target_sweeps_map[f"{kid}_F"])
+        target_sweeps[kid] = (If, Qf, Ff)
+
+    return kids, target_sweeps
+
+
+def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
+                            iq_key: str = "data", df_method: str = "hybrid",
+                            threshold_frac: float = 0.05):
+    """
+    Convert one real-data scan frame into a frame-level Chunk.
+
+    Raw I/Q is stored as a G3SuperTimestream with names "<kid>_I", "<kid>_Q"
+    (same convention as the calibration sweep). Each detector's I/Q is
+    converted to fractional frequency shift (df) against its own
+    calibration sweep.
+    """
+    super_ts = frame[iq_key]
+    names    = np.asarray(super_ts.names)
+    n_dets   = len(kids)
+    n_samps  = super_ts.data.shape[1]
+
+    sig = np.zeros((n_samps, n_dets), dtype=float)
+
+    for i, kid in enumerate(kids):
+        i_idx = int(np.where(names == f"{kid}_I")[0][0])
+        q_idx = int(np.where(names == f"{kid}_Q")[0][0])
+        I = np.asarray(super_ts.data[i_idx], dtype=float)
+        Q = np.asarray(super_ts.data[q_idx], dtype=float)
+        If, Qf, Ff = target_sweeps[kid]
+
+        if df_method == "hybrid":
+            df, _used_fallback = iq_to_df_hybrid(I, Q, If, Qf, Ff, threshold_frac=threshold_frac)
+        else:
+            df = iq_to_df(I, Q, If, Qf, Ff)
+        sig[:, i] = df
+
+    ra_bore  = np.array(frame["ra"])  / core.G3Units.deg
+    dec_bore = np.array(frame["dec"]) / core.G3Units.deg
+
+    t_start = super_ts.times[0].time  / core.G3Units.s
+    t_stop  = super_ts.times[-1].time / core.G3Units.s
+
+    if sample_rate_ref[0] is None:
+        sample_rate_ref[0] = n_samps / (t_stop - t_start)
+
+    flags = np.zeros((n_samps, n_dets), dtype=bool)  # TODO: real flagging once available
+
+    return Chunk(
+        kids=kids, signal=sig, common_mode=None,
+        ra=None, dec=None,  # per-detector offsets not yet available for real data
+        ra_bore=ra_bore, dec_bore=dec_bore,
+        boresight_q=None, det_dirs=None,
+        t_start=t_start, t_stop=t_stop,
+        sample_rate=sample_rate_ref[0], flags=flags,
+        chunk_index=-1,  # assigned by _rechunk
+    )
+
+
+def _iter_blasttng_chunks(files: list, iq_key: str = "data", target_sweeps_key: str = "target_sweeps",
+                          df_method: str = "hybrid", threshold_frac: float = 0.05) -> Iterator[Chunk]:
+    """Yield one frame-level Chunk per scan frame from real BLAST-TNG-format .g3 files."""
+    kids = None
+    target_sweeps = None
+    sample_rate_ref = [None]
+
+    for path in files:
+        for frame in core.G3File(str(path)):
+            if frame.type == core.G3FrameType.Calibration:
+                kids, target_sweeps = _load_blasttng_calibration(frame, target_sweeps_key)
+            elif frame.type == core.G3FrameType.Scan:
+                if kids is None:
+                    raise RuntimeError(
+                        "Scan frame encountered before calibration frame. "
+                        "Check that the first .g3 file contains a calibration frame."
+                    )
+                yield _blasttng_scan_to_chunk(
+                    frame, kids, target_sweeps, sample_rate_ref,
+                    iq_key=iq_key, df_method=df_method, threshold_frac=threshold_frac,
+                )
+
+
 # ── Public interface ───────────────────────────────────────────────────────────
 
 def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
@@ -343,10 +455,19 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
     fmt = cfg["data"]["format"]
     if fmt == "simulation":
         frame_iter = _iter_simulation_chunks(files, file_fmt, apply_offsets)
+    elif fmt == "blasttng":
+        blasttng_cfg = cfg.get("blasttng", {})
+        frame_iter = _iter_blasttng_chunks(
+            files,
+            iq_key=blasttng_cfg.get("iq_key", "data"),
+            target_sweeps_key=blasttng_cfg.get("target_sweeps_key", "target_sweeps"),
+            df_method=blasttng_cfg.get("df_method", "hybrid"),
+            threshold_frac=blasttng_cfg.get("threshold_frac", 0.05),
+        )
     else:
         raise NotImplementedError(
             f"Data format '{fmt}' is not yet implemented. "
-            f"Currently supported: 'simulation'."
+            f"Currently supported: 'simulation', 'blasttng'."
         )
 
     chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)

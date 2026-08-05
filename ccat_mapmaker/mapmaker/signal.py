@@ -3,16 +3,54 @@
 #
 # Converting raw detector data into calibrated frequency-shift timestreams.
 #
-# MKID detectors respond to light by shifting their resonant frequency. The
-# readout records complex transmission S21 as I (real) and Q (imaginary).
-# We convert (I, Q) to fractional frequency shift dF/F0, which is proportional
-# to optical power.
-#
-# Not used for simulation data -- signal is already a processed quantity.
+# Code based on algorithm developed and refined by Max Chapman (https://github.com/freermax9-gif/CCAT-MKID-)
 # ============================================================================ #
 
+from typing import Optional
 import numpy as np
 
+
+# the hybrid method is a method that default uses a gradient method to estimate df from the I Q data. When the error is fraction of the sweep bandwidth beyond which the linear approximation is considered unreliable and the angle method is used instead (more accurate but slower). The threshold_frac parameter controls this threshold.
+
+def iq_to_df_hybrid(I: np.ndarray, Q: np.ndarray,
+                     If: np.ndarray, Qf: np.ndarray, Ff: np.ndarray,
+                     i_f0: Optional[int] = None, threshold_frac: float = 0.05,
+                     ) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Convert I/Q timestreams to fractional frequency shift dF/F0, using a fast
+    linear approximation near resonance and falling back to the slower,
+    more accurate IQ angle method (iq_to_df) away from it.
+    """
+    if i_f0 is None:
+        i_f0 = int(np.argmin(np.abs(If + 1j * Qf)))
+
+    df = iq_to_df_gradient(I, Q, If, Qf, Ff, i_f0=i_f0)
+
+    bandwidth = Ff.max() - Ff.min()
+    threshold = threshold_frac * bandwidth / Ff[i_f0]
+    used_fallback = np.abs(df) > threshold
+    if used_fallback.any():
+        df[used_fallback] = iq_to_df(I[used_fallback], Q[used_fallback], If, Qf, Ff, i_f0=i_f0)
+
+    return df, used_fallback
+
+def iq_to_df_gradient(I: np.ndarray, Q: np.ndarray,
+             If: np.ndarray, Qf: np.ndarray, Ff: np.ndarray,
+             i_f0: int = None) -> np.ndarray:
+    """
+    Convert I/Q timestreams to fractional frequency shift dF/F0 using a fast linear (tangent-line) approximation at the resonance point.
+    """
+    if i_f0 is None:
+        i_f0 = int(np.argmin(np.abs(If + 1j * Qf)))
+
+    i_grad = min(i_f0, len(If) - 2)
+    dIf = np.diff(If)[i_grad] / np.diff(Ff)[i_grad]
+    dQf = np.diff(Qf)[i_grad] / np.diff(Ff)[i_grad]
+    denom = dIf ** 2 + dQf ** 2
+
+    df = ((I-If[i_f0]) * dIf + (Q-Qf[i_f0]) * dQf) / denom / Ff[i_f0]
+
+    return df
 
 def iq_to_df(I: np.ndarray, Q: np.ndarray,
              If: np.ndarray, Qf: np.ndarray, Ff: np.ndarray,
@@ -21,22 +59,6 @@ def iq_to_df(I: np.ndarray, Q: np.ndarray,
     Convert I/Q timestreams to fractional frequency shift dF/F0 using the IQ
     angle method.
 
-    As the resonant frequency shifts, the measured (I, Q) point travels around
-    the resonance loop in the IQ plane. The angular position encodes the
-    frequency shift, recovered by comparing to a calibration sweep.
-
-    Steps:
-      1. Estimate the centre of the IQ resonance circle from the sweep.
-      2. Compute angle theta of each observed point around that centre.
-      3. Compute angle theta_f for each calibration sweep point.
-      4. Interpolate to find the frequency corresponding to each observed angle.
-
-    I, Q   : (n_samps,) observed timestream, real and imaginary parts of S21
-    If, Qf : (n_sweep_pts,) calibration sweep, real and imaginary parts
-    Ff     : (n_sweep_pts,) frequency axis for the calibration sweep (Hz)
-    i_f0   : index of resonant frequency in Ff; auto-detected as |S21| minimum if None
-
-    Returns df : (n_samps,) fractional frequency shift dF/F0 (dimensionless)
     """
     if i_f0 is None:
         i_f0 = np.argmin(np.abs(If + 1j * Qf))
@@ -56,18 +78,12 @@ def iq_to_df(I: np.ndarray, Q: np.ndarray,
     return df / Ff[i_f0]
 
 
+
 def normalize_tod(tod_1d: np.ndarray, cal_lamp_tod_1d: np.ndarray) -> np.ndarray:
     """
     Normalise a detector timestream so the median is 0 and the cal lamp peak is 1.
 
-    Removes DC offset and puts all detectors on the same scale regardless of
-    individual sensitivity differences.
-
-    tod_1d          : science observation timestream for one detector
-    cal_lamp_tod_1d : cal lamp exposure timestream for the same detector
-
-    Returns normalised timestream, or zeros if detector is dead or cal lamp
-    didn't fire.
+    Removes DC offset and puts all detectors on the same scale regardless of individual sensitivity differences.
     """
     median_val = np.median(tod_1d)
     cal_peak   = np.max(cal_lamp_tod_1d)

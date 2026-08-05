@@ -471,6 +471,7 @@ def main():
     elapsed  = time.perf_counter() - t_total
     metadata = {
         "run_timestamp"              : timestamp,
+        "data_format"                : cfg["data"]["format"],
         "obs_t_start_g3s"            : obs_info["t_start_g3s"],
         "obs_t_stop_g3s"             : obs_info["t_stop_g3s"],
         "obs_t_start_utc"            : obs_utc.isoformat(),
@@ -504,6 +505,10 @@ def main():
             "pass_times_s": [t for _, t in pass_times],
         },
     }
+    if cfg["data"]["format"] == "blasttng":
+        blasttng_cfg = cfg.get("blasttng", {})
+        metadata["df_method"]      = blasttng_cfg.get("df_method", "hybrid")
+        metadata["threshold_frac"] = blasttng_cfg.get("threshold_frac", 0.05)
     output.save_metadata(metadata, out_dir)
 
     # ------------------------------------------------------------------ #

@@ -30,10 +30,12 @@ from datetime import datetime, timedelta, timezone
 import os
 
 import numpy as np
+from scipy.ndimage import gaussian_filter
+from scipy.signal import periodogram
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from mapmaker.reader      import iter_chunks
+from mapmaker.reader      import iter_chunks, get_blasttng_baked_shifts
 from mapmaker.cleaning    import clean_tod
 from mapmaker.binning     import make_map_edges, bin_chunk, bin_detector
 from mapmaker.common_mode import estimate_common_mode, subtract_common_mode, iterate_common_mode
@@ -56,12 +58,23 @@ def resolve_paths(cfg: dict, config_path: pathlib.Path) -> dict:
 
 def _first_pass(cfg: dict):
     """
-    Single streaming pass to compute per-detector baselines, noise, and mean boresight.
+    Single streaming pass to compute per-detector baselines, noise, mean boresight,
+    and white-noise-floor PSD.
 
     Uses the median of each chunk's signal (averaged across chunks) for the
     baseline -- robust to cosmic ray tails. Computes per-detector noise as the
     true global std of first-differences by accumulating sum and sum-of-squares
     across all chunks before computing the final statistic.
+
+    PSD is accumulated as an average of per-chunk periodograms -- equivalent to
+    Welch's method using each chunk as one segment -- so the full timestream never
+    needs to be held in memory (contrast with computing this in a notebook via
+    scipy.signal.welch on the concatenated array). Only full-length chunks are
+    included, since a truncated final chunk has a different frequency axis and
+    can't be averaged with the others; with hundreds of chunks per observation,
+    dropping one is negligible.
+    white_noise_floor is the median PSD in a high-frequency band (0.4-0.9x
+    Nyquist), same convention as blasttng_flagging_characterization.ipynb.
     """
     ra_sum = dec_sum = n_bore = 0
     det_median_sum = det_diff_sum = det_diff_sum_sq = None
@@ -69,6 +82,11 @@ def _first_pass(cfg: dict):
     n_chunks = 0
     t_obs_start = t_obs_stop = None
     n_dets = sample_rate = kids = None
+
+    psd_sum = None
+    psd_count = 0
+    psd_freqs = None
+    nominal_chunk_len = None
 
     for chunk in iter_chunks(cfg):
         flags = chunk.flags
@@ -83,6 +101,7 @@ def _first_pass(cfg: dict):
             n_dets      = chunk.signal.shape[1]
             sample_rate = chunk.sample_rate
             kids        = chunk.kids
+            nominal_chunk_len = chunk.signal.shape[0]
 
         t_obs_stop = chunk.t_stop
 
@@ -101,6 +120,14 @@ def _first_pass(cfg: dict):
         det_diff_count  += len(diffs)
         n_chunks += 1
 
+        if chunk.signal.shape[0] == nominal_chunk_len:
+            f, p = periodogram(chunk.signal, fs=sample_rate, axis=0)
+            if psd_sum is None:
+                psd_sum   = np.zeros_like(p)
+                psd_freqs = f
+            psd_sum   += p
+            psd_count += 1
+
     obs_info = dict(
         t_start_g3s    = t_obs_start,
         t_stop_g3s     = t_obs_stop,
@@ -113,7 +140,17 @@ def _first_pass(cfg: dict):
         det_diff_sum_sq / det_diff_count - (det_diff_sum / det_diff_count) ** 2,
         0, None
     ))
-    return ra_sum / n_bore, dec_sum / n_bore, det_median_sum / n_chunks, det_noise, kids, obs_info
+
+    psd_avg = psd_sum / psd_count if psd_count > 0 else None
+    white_noise_floor = None
+    if psd_avg is not None:
+        nyquist    = sample_rate / 2
+        white_band = (psd_freqs > 0.4 * nyquist) & (psd_freqs < 0.9 * nyquist)
+        # psd_avg is (n_freq, n_dets) -- median over freq axis for each detector
+        white_noise_floor = np.median(psd_avg[white_band, :], axis=0)
+
+    return (ra_sum / n_bore, dec_sum / n_bore, det_median_sum / n_chunks, det_noise,
+            kids, obs_info, white_noise_floor, psd_avg, psd_freqs)
 
 
 def _streaming_pass(cfg: dict, pipe_cfg: dict,
@@ -124,7 +161,10 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                     return_sample: bool = False,
                     keep_idx: np.ndarray = None,
                     boresight_only: bool = False,
-                    collect_tod_rms: bool = False):
+                    collect_tod_rms: bool = False,
+                    kids_kept: list = None,
+                    kid_shifts: dict = None,
+                    compute_detsplit_null: bool = False):
     """
     One streaming pass over all chunks: baseline subtract, clean, optionally
     common-mode subtract, then bin into the map accumulator.
@@ -136,11 +176,48 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                    CM subtraction for PSD diagnostics.
     collect_tod_rms: if True, records median detector RMS per chunk before and
                      after CM subtraction as a list of (t_start, rms_raw, rms_cm).
+    kids_kept: names of the kept detectors, same order as det_offsets/keep_idx.
+               Only used to look up kid_shifts; ignored otherwise.
+    kid_shifts: optional {kid_name: (ra_shift_deg, dec_shift_deg)}, applied on
+                top of shared boresight pointing when per-detector offsets
+                aren't known (chunk.ra is None) -- e.g. real data before focal
+                plane calibration, where each detector's own peak (found by
+                the per-detector pass) is used to correct for its position on
+                the array, same mechanism blasttng-to-g3/g3_utils and mmi both
+                use. Never applied when boresight_only=True (that mode means
+                "ignore any offset, show pure boresight" by design), and has
+                no effect when chunk.ra is already populated (simulation with
+                apply_offsets=True), so this leaves simulation behaviour
+                unchanged.
+    compute_detsplit_null: if True, also builds a null map from a random 50/50
+                *detector*-identity split (fixed seed, reproducible) rather than
+                the always-on chunk-parity time split above -- tests whether one
+                random half of the array agrees with the other, independent of
+                any time-domain noise correlation. Costs two extra bin_chunk
+                calls per chunk (unlike the chunk-parity null map, which reuses
+                the main bin_chunk result for free), so off by default -- only
+                worth enabling once per run, not on every pass.
     """
     ny = len(dec_edges) - 1
     nx = len(ra_edges)  - 1
-    total_data = np.zeros((ny, nx), dtype=float)
-    total_hits = np.zeros((ny, nx), dtype=float)
+    total_data  = np.zeros((ny, nx), dtype=float)
+    total_hits  = np.zeros((ny, nx), dtype=float)
+    total_sumsq = np.zeros((ny, nx), dtype=float)
+
+    # Null-test split: whole chunks alternate between two independent halves
+    # (chunk_index parity) so both halves get matched sky coverage over the
+    # observation. (data_a, hits_a), (data_b, hits_b).
+    null_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+    null_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+
+    # Detector-split null test: random 50/50 split by detector identity, fixed
+    # over the whole pass. Separate accumulators, only touched when enabled.
+    detsplit_null_map = None
+    if compute_detsplit_null:
+        n_dets_kept   = len(det_offsets)
+        det_half      = np.random.default_rng(0).integers(0, 2, size=n_dets_kept)
+        detsplit_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+        detsplit_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
 
     n_dets = sample_rate = None
     psd_raw = psd_cm = None
@@ -156,22 +233,39 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
             n_dets      = len(chunk.kids)
             sample_rate = chunk.sample_rate
 
-        ra  = chunk.ra
-        dec = chunk.dec
+        ra    = chunk.ra
+        dec   = chunk.dec
         flags = chunk.flags
-        flag_mask = np.ones(np.shape(flags))
-        flag_mask[flags == 1] = np.nan
-        
+        no_per_detector_offsets = ra is None
+
         if keep_idx is not None:
-            sig = chunk.signal[:, keep_idx] - det_offsets[np.newaxis, :]
-            ra  = ra[:,  keep_idx]
-            dec = dec[:, keep_idx]
+            sig   = chunk.signal[:, keep_idx] - det_offsets[np.newaxis, :]
+            flags = flags[:, keep_idx]
+            if ra is not None:
+                ra  = ra[:,  keep_idx]
+                dec = dec[:, keep_idx]
         else:
             sig = chunk.signal - det_offsets[np.newaxis, :]
 
-        if boresight_only:
+        flag_mask = np.ones(np.shape(flags))
+        flag_mask[flags == 1] = np.nan
+
+        # ra is None whenever per-detector focal-plane offsets aren't available
+        # (e.g. real data before calibration, or apply_offsets=False) -- fall
+        # back to shared boresight pointing for every kept detector, same as
+        # the explicit boresight_only comparison pass.
+        if boresight_only or ra is None:
             ra  = np.repeat(chunk.ra_bore[:, np.newaxis], sig.shape[1], axis=1)
             dec = np.repeat(chunk.dec_bore[:, np.newaxis], sig.shape[1], axis=1)
+
+            # Per-detector shift correction -- only when offsets are truly
+            # unknown (not for an explicit boresight_only comparison, which
+            # means "show me it with no offset applied" by definition).
+            if no_per_detector_offsets and not boresight_only and kid_shifts and kids_kept is not None:
+                shift_ra  = np.array([kid_shifts.get(k, (0.0, 0.0))[0] for k in kids_kept])
+                shift_dec = np.array([kid_shifts.get(k, (0.0, 0.0))[1] for k in kids_kept])
+                ra  = ra  + shift_ra[np.newaxis, :]
+                dec = dec + shift_dec[np.newaxis, :]
 
         sig = clean_tod(sig, flag_mask, chunk.sample_rate,
                         cosmic_rays=pipe_cfg["clean_cosmic_rays"],
@@ -197,16 +291,49 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
             rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
             tod_rms_data.append((chunk.t_start, rms_raw, rms_cm))
             
-        d, h = bin_chunk(sig, flag_mask, ra, dec, ra_edges, dec_edges)
+        d, h, sq = bin_chunk(sig, flag_mask, ra, dec, ra_edges, dec_edges)
         # print(f"d: {d}")
-        total_data += d
-        total_hits += h
+        total_data  += d
+        total_hits  += h
+        total_sumsq += sq
+
+        half = chunk_id % 2
+        null_data[half] += d
+        null_hits[half] += h
+
+        if compute_detsplit_null:
+            for dhalf in (0, 1):
+                m = det_half == dhalf
+                d_ds, h_ds, _ = bin_chunk(sig[:, m], flag_mask[:, m], ra[:, m], dec[:, m],
+                                          ra_edges, dec_edges)
+                detsplit_data[dhalf] += d_ds
+                detsplit_hits[dhalf] += h_ds
 
     with np.errstate(invalid='ignore', divide='ignore'):
         combined = np.where(total_hits > 0, total_data / total_hits, np.nan)
 
+        # RMS noise map: standard error of the per-pixel mean, from the actual
+        # scatter of samples landing in each pixel (E[x^2] - E[x]^2 / N),
+        # rather than assuming unit variance per sample (see 1/sqrt(hits)).
+        mean_sq   = np.where(total_hits > 0, total_sumsq / total_hits, np.nan)
+        variance  = np.clip(mean_sq - combined ** 2, 0, None)
+        noise_map = np.sqrt(variance / total_hits)
+
+        # Null/jackknife map: half-difference of two independent chunk-parity
+        # splits. Should be consistent with noise (no residual structure) if
+        # the combined map's apparent features are real signal, not noise.
+        map_a = np.where(null_hits[0] > 0, null_data[0] / null_hits[0], np.nan)
+        map_b = np.where(null_hits[1] > 0, null_data[1] / null_hits[1], np.nan)
+        null_map = (map_a - map_b) / 2.0
+
+        if compute_detsplit_null:
+            map_a_ds = np.where(detsplit_hits[0] > 0, detsplit_data[0] / detsplit_hits[0], np.nan)
+            map_b_ds = np.where(detsplit_hits[1] > 0, detsplit_data[1] / detsplit_hits[1], np.nan)
+            detsplit_null_map = (map_a_ds - map_b_ds) / 2.0
+
     sample = {"raw": psd_raw, "cm": psd_cm} if return_sample else None
-    return combined, total_hits, n_dets, sample_rate, sample, tod_rms_data
+    return (combined, total_hits, noise_map, null_map, detsplit_null_map,
+            n_dets, sample_rate, sample, tod_rms_data)
 
 
 def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarray]:
@@ -344,7 +471,8 @@ def main():
     centre_pinned = "ra0_deg" in map_cfg and "dec0_deg" in map_cfg
     print(f"Step 1: First pass ({'baselines only' if centre_pinned else 'baselines + map centre'})...")
     t = time.perf_counter()
-    ra0_auto, dec0_auto, det_offsets, det_noise, all_kids, obs_info = _first_pass(cfg)
+    (ra0_auto, dec0_auto, det_offsets, det_noise, all_kids, obs_info,
+     white_noise_floor, psd_avg, psd_freqs) = _first_pass(cfg)
     print(f"  Baselines: {det_offsets.min():.4f} - {det_offsets.max():.4f}  [{time.perf_counter()-t:.1f}s]")
 
     # Resolve detector exclusion (manual + optional auto)
@@ -376,6 +504,34 @@ def main():
     if manual_names or manual_indices:
         print(f"  Manual exclusion: {len(manual_names) + len(manual_indices)} detector(s)")
 
+    # "raw" keep set: manual + auto only, NOT white-noise-floor-filtered -- used
+    # for the raw comparison map below (no common-mode applied to it).
+    raw_keep_idx = np.array([i for i in range(n_total) if i not in exclude_set], dtype=int)
+
+    # White-noise-floor exclusion, on top of manual/auto -- this becomes the
+    # detector set used for the actual (common-mode-iterated) science map.
+    # NOT a linear N*median cutoff: white_noise_floor is extremely heavy-tailed
+    # (75th percentile can already be ~7x the median), so a linear multiplier
+    # excludes a large, arbitrary chunk of the array rather than catching real
+    # outliers -- see blasttng_flagging_characterization.ipynb Section 8 for the
+    # distribution plots that motivated this. Cutoff is done in log-space
+    # instead: median + N*sigma of log10(white_noise_floor), matching the
+    # log-normal-ish shape of this metric (same technique as Chapin et al. 2013,
+    # SCUBA-2/SMURF Section 3.1.6, "outliers from the centre of the logarithm...
+    # of the bolometer noise distribution").
+    wnf_sigma    = pipe_cfg.get("wnf_exclude_sigma", 3.0)
+    wnf_excluded = []
+    wnf_cutoff   = None
+    if wnf_sigma > 0 and white_noise_floor is not None:
+        finite_wnf = np.isfinite(white_noise_floor) & (white_noise_floor > 0)
+        log_wnf    = np.log10(white_noise_floor[finite_wnf])
+        wnf_cutoff = 10 ** (np.median(log_wnf) + wnf_sigma * np.std(log_wnf))
+        wnf_bad    = np.where(finite_wnf & (white_noise_floor > wnf_cutoff))[0]
+        wnf_excluded = [all_kids[i] for i in wnf_bad]
+        exclude_set.update(wnf_bad.tolist())
+        print(f"  WNF-exclusion: cutoff={wnf_cutoff:.4g} (log-median+{wnf_sigma}sigma)  "
+              f"excluded={len(wnf_bad)}/{n_total}")
+
     keep_idx = np.array([i for i in range(n_total) if i not in exclude_set], dtype=int)
     det_offsets_kept = det_offsets[keep_idx]
     print(f"  Using {len(keep_idx)}/{n_total} detectors")
@@ -399,23 +555,118 @@ def main():
     print(f"  Map grid   : {ny} x {nx} pixels ({map_cfg['res_arcmin']:.1f} arcmin/pixel), "
           f"centre = ({ra0_deg:.4f}, {dec0_deg:.4f}) [{centre_source}]")
 
+    kids_kept = [all_kids[i] for i in keep_idx]
+    raw_det_offsets_kept = det_offsets[raw_keep_idx]
+    raw_kids_kept        = [all_kids[i] for i in raw_keep_idx]
+
+    # ------------------------------------------------------------------ #
+    # STEP 1b: Per-detector shift correction (real data only) --
+    # Real per-detector focal-plane offsets aren't known yet (see reader.py),
+    # so every detector currently gets binned at the same shared boresight
+    # position -- this collapses the whole array onto one line instead of
+    # the wide swath a real spread-out focal plane traces out, leaving large
+    # gaps between scan legs in the combined map. Fix: run the per-detector
+    # pass now, and use each detector's own peak (found against boresight
+    # alone) to correct for its position on the array before the combined
+    # map bins it -- same mechanism blasttng-to-g3/g3_utils (roach1_shifts_radec.npy,
+    # baked into the calibration frame) and mmi (per-detector sourceCoords)
+    # both actually use.
+    # Simulation already has real per-detector offsets via apply_offsets, so
+    # this is skipped entirely there and nothing about its behaviour changes.
+    # ------------------------------------------------------------------ #
+    pd_cfg = cfg.get("per_detector", {})
+    kid_shifts = None
+    pd_results = None  # (kids_sel, det_data, det_hits) -- reused at Step 6 if already computed here
+
+    if cfg["data"]["format"] == "blasttng":
+        baked_shifts = get_blasttng_baked_shifts(cfg)
+        if baked_shifts:
+            kid_shifts = baked_shifts
+            print(f"\nStep 1b: Using pre-baked per-detector shifts from the calibration "
+                  f"frame ({len(kid_shifts)} detectors) -- skipping empirical computation.")
+
+    if cfg["data"]["format"] == "blasttng" and pd_cfg.get("enabled", False):
+        label = "Per-detector maps" if kid_shifts is not None else "Per-detector maps (for shift correction)"
+        print(f"\nStep 1b: {label}...")
+        t = time.perf_counter()
+        kids_sel, det_data, det_hits = _per_detector_pass(
+            cfg, pipe_cfg, pd_cfg, ra_edges, dec_edges, det_offsets,
+        )
+        print(f"  Pass complete [{time.perf_counter() - t:.1f}s]")
+        pd_results = (kids_sel, det_data, det_hits)
+
+    if kid_shifts is None and pd_results is not None:
+        # No pre-baked shifts available -- fall back to computing our own,
+        # empirically, from the per-detector pass just run above.
+        kids_sel, det_data, det_hits = pd_results
+        ra_centres  = 0.5 * (ra_edges[:-1]  + ra_edges[1:])
+        dec_centres = 0.5 * (dec_edges[:-1] + dec_edges[1:])
+        min_snr = pd_cfg.get("shift_min_snr", 3.0)
+        kid_shifts = {}
+        for j, kid in enumerate(kids_sel):
+            with np.errstate(invalid="ignore", divide="ignore"):
+                m = np.where(det_hits[j] > 0, det_data[j] / det_hits[j], np.nan)
+            if not np.any(np.isfinite(m)):
+                continue
+
+            # Smooth before peak-finding -- a single detector's own map has a
+            # low hit count per pixel, so raw argmax mostly just finds the
+            # brightest noise spike rather than a real source. Same fix
+            # blasttng-to-g3's g3_utils.maps.SingleMapBinner.source_coords
+            # uses (gaussian_filter before argmax).
+            filled   = np.where(np.isfinite(m), m, np.nanmedian(m))
+            smoothed = gaussian_filter(filled, sigma=2)
+            iy, ix   = np.unravel_index(np.argmax(smoothed), smoothed.shape)
+
+            # Only trust detectors with a real detection -- same peak-vs-
+            # off-source-noise convention as output.py's centroids.json.
+            # A low-S/N "peak" is noise; shifting by it would scatter that
+            # detector's contribution essentially randomly instead of
+            # correcting its position, which is worse than not shifting it.
+            off_mask = np.isfinite(m) & (m < np.nanpercentile(m[np.isfinite(m)], 50))
+            noise    = np.sqrt(np.nanmean(m[off_mask] ** 2)) if off_mask.any() else np.nan
+            peak_val = m[iy, ix]
+            peak_snr = peak_val / noise if (np.isfinite(noise) and noise > 0 and np.isfinite(peak_val)) else np.nan
+
+            if np.isfinite(peak_snr) and peak_snr >= min_snr:
+                kid_shifts[kid] = (ra0_deg - ra_centres[ix], dec0_deg - dec_centres[iy])
+        print(f"  Computed shifts for {len(kid_shifts)}/{len(kids_sel)} detectors (S/N >= {min_snr})")
+
+    # ------------------------------------------------------------------ #
+    # STEP 1c: Raw map -- manual+auto exclusion only, no white-noise-floor
+    # filtering and no common-mode subtraction. Comparison reference against
+    # quiet_map/combined_map below, which additionally excludes WNF outliers
+    # and gets the full common-mode treatment.
+    # ------------------------------------------------------------------ #
+    t = time.perf_counter()
+    print(f"\nStep 1c: Raw map ({len(raw_keep_idx)}/{n_total} detectors, "
+          f"manual+auto exclusion only)...")
+    raw_map, _, _, _, _, _, _, _, _ = _streaming_pass(
+        cfg, pipe_cfg, ra_edges, dec_edges, raw_det_offsets_kept,
+        common_mode=False, keep_idx=raw_keep_idx,
+        kids_kept=raw_kids_kept, kid_shifts=kid_shifts)
+    print(f"  [{time.perf_counter() - t:.1f}s]")
+
     # ------------------------------------------------------------------ #
     # STEP 2: Naive map + initial common-mode pass
     # ------------------------------------------------------------------ #
     chunk_s     = pipe_cfg.get("chunk_duration_s", 1.0)
     t = time.perf_counter()
     print(f"Step 2: Naive map (chunk_duration_s={chunk_s})...")
-    naive, _, n_dets, sr, raw_sample, _ = _streaming_pass(
+    naive, _, _, _, _, n_dets, sr, raw_sample, _ = _streaming_pass(
         cfg, pipe_cfg, ra_edges, dec_edges, det_offsets_kept,
-        common_mode=False, return_sample=True, keep_idx=keep_idx)
+        common_mode=False, return_sample=True, keep_idx=keep_idx,
+        kids_kept=kids_kept, kid_shifts=kid_shifts)
     t_naive = time.perf_counter() - t
     print(f"  {n_dets} detectors, {sr:.1f} Hz  [{t_naive:.1f}s]")
 
     t = time.perf_counter()
     print("Step 2: Initial common-mode pass...")
-    combined_map, hits, _, _, cm_sample, tod_rms_data = _streaming_pass(
+    (combined_map, hits, noise_map, null_map, detsplit_null_map,
+     _, _, cm_sample, tod_rms_data) = _streaming_pass(
         cfg, pipe_cfg, ra_edges, dec_edges, det_offsets_kept,
-        return_sample=True, keep_idx=keep_idx, collect_tod_rms=True)
+        return_sample=True, keep_idx=keep_idx, collect_tod_rms=True,
+        kids_kept=kids_kept, kid_shifts=kid_shifts, compute_detsplit_null=True)
     t_it0 = time.perf_counter() - t
     print(f"  [{t_it0:.1f}s]")
 
@@ -433,9 +684,10 @@ def main():
         for i in range(1, n_iters + 1):
             t = time.perf_counter()
             print(f"  Iteration {i}/{n_iters}...", end=" ", flush=True)
-            combined_map, hits, _, _, _, _ = _streaming_pass(
+            combined_map, hits, noise_map, null_map, _, _, _, _, _ = _streaming_pass(
                 cfg, pipe_cfg, ra_edges, dec_edges, det_offsets_kept,
                 current_map=combined_map, keep_idx=keep_idx,
+                kids_kept=kids_kept, kid_shifts=kid_shifts,
             )
             t_iter = time.perf_counter() - t
             cm_maps.append((f"it_{i}", combined_map.copy()))
@@ -447,8 +699,13 @@ def main():
     # ------------------------------------------------------------------ #
     # STEP 4: Save outputs
     # ------------------------------------------------------------------ #
-    output.save_iteration_maps(naive, cm_maps, hits,
-                               ra_edges, dec_edges, out_dir, cfg["output"])
+    output.save_iteration_maps(naive, cm_maps, hits, noise_map, null_map,
+                               ra_edges, dec_edges, out_dir, cfg["output"],
+                               raw_map=raw_map, detsplit_null=detsplit_null_map)
+
+    output.plot_wnf_diagnostic(white_noise_floor, wnf_cutoff, wnf_sigma,
+                               os.path.join(out_dir, "wnf_diagnostic.png"))
+    print("    Saved wnf_diagnostic.png")
 
     metrics = output.compute_convergence_metrics(naive, cm_maps, hits)
     output.plot_diagnostics(metrics, pass_times, os.path.join(out_dir, "diagnostics.png"))
@@ -517,7 +774,7 @@ def main():
     if cfg["map"].get("compare_boresight", False):
         print("\nStep 5: Boresight-only comparison pass...")
         t = time.perf_counter()
-        bore_map, _, _, _, _, _ = _streaming_pass(
+        bore_map, _, _, _, _, _, _, _, _ = _streaming_pass(
             cfg, pipe_cfg, ra_edges, dec_edges, det_offsets_kept,
             common_mode=False, boresight_only=True, keep_idx=keep_idx)
         print(f"  [{time.perf_counter() - t:.1f}s]")
@@ -529,19 +786,22 @@ def main():
     # ------------------------------------------------------------------ #
     # STEP 6: Per-detector maps (optional)
     # ------------------------------------------------------------------ #
-    pd_cfg = cfg.get("per_detector", {})
     if pd_cfg.get("enabled", False):
         print(f"\nStep 5: Per-detector maps...")
-        t = time.perf_counter()
-        kids_sel, det_data, det_hits = _per_detector_pass(
-            cfg, pipe_cfg, pd_cfg, ra_edges, dec_edges, det_offsets,
-        )
-        print(f"  Pass complete [{time.perf_counter() - t:.1f}s]")
+        if pd_results is not None:
+            kids_sel, det_data, det_hits = pd_results  # already computed at Step 1b
+        else:
+            t = time.perf_counter()
+            kids_sel, det_data, det_hits = _per_detector_pass(
+                cfg, pipe_cfg, pd_cfg, ra_edges, dec_edges, det_offsets,
+            )
+            print(f"  Pass complete [{time.perf_counter() - t:.1f}s]")
         flagged = output.save_per_detector_maps(
             kids_sel, det_data, det_hits,
             ra_edges, dec_edges,
             os.path.join(out_dir, "per_detector"),
             pd_cfg,
+            psd_avg=psd_avg, psd_freqs=psd_freqs, psd_all_kids=all_kids,
         )
         metadata["detectors_to_check"] = list(flagged.keys())
         metadata["n_detectors_flagged"] = len(flagged)

@@ -44,8 +44,8 @@ def iq_to_df_gradient(I: np.ndarray, Q: np.ndarray,
         i_f0 = int(np.argmin(np.abs(If + 1j * Qf)))
 
     i_grad = min(i_f0, len(If) - 2)
-    dIf = np.diff(If)[i_grad] / np.diff(Ff)[i_grad]
-    dQf = np.diff(Qf)[i_grad] / np.diff(Ff)[i_grad]
+    dIf = np.diff(If)[i_grad] / 1e3
+    dQf = np.diff(Qf)[i_grad] / 1e3
     denom = dIf ** 2 + dQf ** 2
 
     df = ((I-If[i_f0]) * dIf + (Q-Qf[i_f0]) * dQf) / denom / Ff[i_f0]
@@ -82,7 +82,6 @@ def iq_to_df(I: np.ndarray, Q: np.ndarray,
 def normalize_tod(tod_1d: np.ndarray, cal_lamp_tod_1d: np.ndarray) -> np.ndarray:
     """
     Normalise a detector timestream so the median is 0 and the cal lamp peak is 1.
-
     Removes DC offset and puts all detectors on the same scale regardless of individual sensitivity differences.
     """
     median_val = np.median(tod_1d)

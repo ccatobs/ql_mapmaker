@@ -16,12 +16,15 @@ FONT_LABEL  = 11
 FONT_TICK   = 9
 CMAP_SIGNAL = "plasma"
 CMAP_HITS   = "viridis"
+CMAP_NULL   = "RdBu_r"
 DPI         = 200
 
 
 def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarray,
                            ra_edges: np.ndarray, dec_edges: np.ndarray,
-                           out_dir: pathlib.Path, pd_cfg: dict):
+                           out_dir: pathlib.Path, pd_cfg: dict,
+                           psd_avg: np.ndarray = None, psd_freqs: np.ndarray = None,
+                           psd_all_kids: list = None):
     """
     Save per-detector signal maps and centroids for pointing model reconstruction.
 
@@ -29,6 +32,10 @@ def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarra
       - Computes the signal map (data / hits)
       - Finds the peak pixel and records its RA/Dec as the centroid
       - Optionally saves a PNG and/or .npy file
+      - If psd_avg/psd_freqs/psd_all_kids are given (from run_mapmaker._first_pass),
+        also saves a per-detector PSD plot looked up by name via psd_all_kids
+        since that list's ordering isn't guaranteed to match `kids` (which may be
+        a filtered/reordered subset from _per_detector_pass).
 
     Centroids for all detectors are saved to centroids.json regardless of
     save_png/save_numpy settings.
@@ -36,8 +43,10 @@ def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarra
     out_dir = pathlib.Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    save_png   = pd_cfg.get("save_png",   True)
-    save_numpy = pd_cfg.get("save_numpy", False)
+    save_png     = pd_cfg.get("save_png",   True)
+    save_numpy   = pd_cfg.get("save_numpy", False)
+    save_psd_png = pd_cfg.get("save_psd_png", True)
+    psd_kid_to_i = {k: i for i, k in enumerate(psd_all_kids)} if psd_all_kids is not None else {}
 
     ra_centres  = 0.5 * (ra_edges[:-1]  + ra_edges[1:])
     dec_centres = 0.5 * (dec_edges[:-1] + dec_edges[1:])
@@ -82,6 +91,18 @@ def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarra
                       cmap=CMAP_SIGNAL, vmin=vmin, vmax=vmax,
                       cbar_label="Signal")
 
+        if save_psd_png and psd_avg is not None and name in psd_kid_to_i:
+            psd_idx = psd_kid_to_i[name]
+            fig, ax = plt.subplots(figsize=(6, 4.5))
+            ax.loglog(psd_freqs[1:], psd_avg[1:, psd_idx], color="#2980b9", lw=1.1)
+            ax.set_xlabel("Frequency [Hz]")
+            ax.set_ylabel("PSD  [signal$^2$ Hz$^{-1}$]")
+            ax.set_title(f"Detector: {name}")
+            ax.grid(alpha=0.2, which="both")
+            plt.tight_layout()
+            plt.savefig(out_dir / f"{safe_name}_psd.png", dpi=DPI, bbox_inches="tight")
+            plt.close(fig)
+
         if (j + 1) % 50 == 0 or (j + 1) == n_dets:
             print(f"    {j + 1}/{n_dets} detectors saved")
 
@@ -117,22 +138,40 @@ def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarra
 def save_iteration_maps(naive: np.ndarray,
                         cm_maps: list[tuple[str, np.ndarray]],
                         hits: np.ndarray,
+                        noise: np.ndarray,
+                        null: np.ndarray,
                         ra_edges: np.ndarray, dec_edges: np.ndarray,
                         output_dir: pathlib.Path,
-                        out_cfg: dict):
+                        out_cfg: dict,
+                        raw_map: np.ndarray = None,
+                        detsplit_null: np.ndarray = None):
     """
-    Save naive map, CM iteration maps, hits, and noise to disk.
+    Save naive map, CM iteration maps, hits, noise, and null to disk.
+
+    noise: per-pixel RMS of the mean, from the actual sample scatter
+           (E[x^2] - E[x]^2) / hits, see run_mapmaker._streaming_pass.
+    time_null:  half-difference of two chunk-split independent maps: should
+           show no residual structure if the combined map's features are
+           real signal rather than noise (a jackknife/null test).
+    raw_map: optional naive-style map (no common-mode) using manual+auto
+             exclusion only, comparison reference against `naive`/cm_maps,
+             which additionally exclude white-noise-floor outliers.
+    detsplit_null: optional null map from a random 50/50 *detector*-identity
+             split (vs. `time_null`'s chunk- time split) -- see
+             run_mapmaker._streaming_pass(compute_detsplit_null=True).
 
     Writes .npy and .png for each map, plus an overview grid (overview.png).
-    Grid layout: naive + all CM iterations in the top rows, hits + noise below.
+    Grid layout: naive + all CM iterations in the top rows, hits + noise +
+    null below.
     """
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    with np.errstate(divide='ignore', invalid='ignore'):
-        noise = np.where(hits > 0, 1.0 / np.sqrt(hits), np.nan)
-
-    all_maps = [("naive", naive)] + cm_maps + [("hits", hits), ("noise", noise)]
+    all_maps = [("naive", naive)] + cm_maps + [("hits", hits), ("noise", noise), ("null", null)]
+    if raw_map is not None:
+        all_maps.append(("raw", raw_map))
+    if detsplit_null is not None:
+        all_maps.append(("detsplit_null", detsplit_null))
 
     if out_cfg.get("save_numpy", True):
         for label, m in all_maps:
@@ -146,12 +185,31 @@ def save_iteration_maps(naive: np.ndarray,
         sig_vmin, sig_vmax   = _global_scale(signal_maps)
         hits_vmin, hits_vmax = _percentile_scale(hits)
         noise_vmin, noise_vmax = _percentile_scale(noise)
+        null_vmin, null_vmax = _global_scale([("null", null)])
 
         for label, m in signal_maps:
             _plot_map(m, ra_edges, dec_edges,
                       filepath=output_dir / f"{label}.png",
                       title=_pretty_title(label),
                       cmap=CMAP_SIGNAL, vmin=sig_vmin, vmax=sig_vmax,
+                      cbar_label="Signal")
+        if raw_map is not None:
+            _plot_map(raw_map, ra_edges, dec_edges,
+                      filepath=output_dir / "raw.png",
+                      title="Raw Map (manual+auto exclusion only)",
+                      cmap=CMAP_SIGNAL, vmin=sig_vmin, vmax=sig_vmax,
+                      cbar_label="Signal")
+        _plot_map(null, ra_edges, dec_edges,
+                  filepath=output_dir / "time_null.png",
+                  title="Null Map (time chunk half-difference)",
+                  cmap=CMAP_NULL, vmin=null_vmin, vmax=null_vmax,
+                  cbar_label="Signal")
+        if detsplit_null is not None:
+            ds_vmin, ds_vmax = _global_scale([("detsplit_null", detsplit_null)])
+            _plot_map(detsplit_null, ra_edges, dec_edges,
+                      filepath=output_dir / "detsplit_null.png",
+                      title="Null Map (random detector-split half-difference)",
+                      cmap=CMAP_NULL, vmin=ds_vmin, vmax=ds_vmax,
                       cbar_label="Signal")
         _plot_map(hits, ra_edges, dec_edges,
                   filepath=output_dir / "hits.png",
@@ -162,7 +220,7 @@ def save_iteration_maps(naive: np.ndarray,
                   filepath=output_dir / "noise.png",
                   title="Noise Map",
                   cmap=CMAP_HITS, vmin=noise_vmin, vmax=noise_vmax,
-                  cbar_label="1 / sqrt(hits)")
+                  cbar_label="RMS of pixel mean")
 
         print(f"    Saved {len(all_maps)} individual PNGs")
         print(f"      Signal scale : {sig_vmin:.3f} - {sig_vmax:.3f}")
@@ -344,6 +402,53 @@ def plot_diagnostics(metrics: dict, pass_times: list[tuple[str, float]],
     plt.close(fig)
 
 
+def plot_wnf_diagnostic(white_noise_floor: np.ndarray, cutoff: float, sigma: float,
+                        filepath: pathlib.Path):
+    """
+    Two-panel white-noise-floor distribution diagnostic: the raw distribution
+    (log-x, heavy-tailed) with the applied cutoff marked, and log10(white_noise_floor)
+    on a linear axis (roughly bell-shaped) with the median and sigma lines
+    """
+    wnf = white_noise_floor[np.isfinite(white_noise_floor) & (white_noise_floor > 0)]
+    if len(wnf) == 0:
+        return
+    median_wnf = np.median(wnf)
+    log_wnf    = np.log10(wnf)
+    med_log    = np.median(log_wnf)
+    std_log    = np.std(log_wnf)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    bins = np.logspace(np.log10(wnf.min()), np.log10(wnf.max()), 60)
+    axes[0].hist(wnf, bins=bins, color="#3498db", edgecolor="white", alpha=0.85)
+    axes[0].axvline(median_wnf, color="k", lw=1.5, label=f"median ({median_wnf:.2e})")
+    if cutoff is not None:
+        n_excl = int((wnf > cutoff).sum())
+        axes[0].axvline(cutoff, color="#e74c3c", ls="--", lw=2,
+                        label=f"cutoff ({cutoff:.2e}) -- excludes {n_excl}/{len(wnf)}")
+    axes[0].set_xscale("log")
+    axes[0].set_xlabel("white_noise_floor")
+    axes[0].set_ylabel("# detectors")
+    axes[0].set_title("Raw distribution (heavy-tailed)")
+    axes[0].legend(fontsize=8)
+    axes[0].grid(alpha=0.2, which="both")
+
+    axes[1].hist(log_wnf, bins=50, color="#9b59b6", edgecolor="white", alpha=0.85)
+    axes[1].axvline(med_log, color="k", lw=1.5, label=f"median = {med_log:.2f}")
+    if cutoff is not None:
+        axes[1].axvline(med_log + sigma * std_log, color="#e74c3c", ls="--", lw=2,
+                        label=f"median + {sigma}sigma = {med_log + sigma*std_log:.2f}")
+    axes[1].set_xlabel("log10(white_noise_floor)")
+    axes[1].set_ylabel("# detectors")
+    axes[1].set_title("log10(white_noise_floor)")
+    axes[1].legend(fontsize=8)
+    axes[1].grid(alpha=0.2)
+
+    plt.tight_layout()
+    plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_boresight_comparison(with_offsets: np.ndarray, boresight_only: np.ndarray,
                               ra_edges: np.ndarray, dec_edges: np.ndarray,
                               filepath: pathlib.Path):
@@ -469,13 +574,12 @@ def _plot_overview_grid(naive: np.ndarray,
                     ra_edges, dec_edges, CMAP_SIGNAL,
                     sig_vmin, sig_vmax, "Signal")
 
-    half = ncols // 2
-    ax_hits  = fig.add_subplot(gs[n_sig_rows, :half])
-    ax_noise = fig.add_subplot(gs[n_sig_rows, half:])
+    ax_hits  = fig.add_subplot(gs[n_sig_rows, 0:1])
+    ax_noise = fig.add_subplot(gs[n_sig_rows, 1:2])
     _draw_panel(ax_hits,  hits,  "Hit Map",   ra_edges, dec_edges,
                 CMAP_HITS, hits_vmin,  hits_vmax,  "Samples per pixel")
     _draw_panel(ax_noise, noise, "Noise Map", ra_edges, dec_edges,
-                CMAP_HITS, noise_vmin, noise_vmax, "1 / sqrt(hits)")
+                CMAP_HITS, noise_vmin, noise_vmax, "RMS of pixel mean")
 
     plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
     plt.close(fig)

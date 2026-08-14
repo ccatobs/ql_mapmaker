@@ -14,6 +14,8 @@ import numpy as np
 import scipy.fft as fft
 
 
+#step correction - should be modular enough that if necessary we can implement this
+
 def remove_cosmic_rays(tod_1d: np.ndarray, flag_mask: np.ndarray,
                        sigma: float = 3.5,
                        n: int = 2) -> np.ndarray:
@@ -88,7 +90,7 @@ def clean_tod(tod: np.ndarray, flag_mask: np.ndarray,
     if highpass_hz > 0.0:
         ### Cannot handle Nan Values cleanly; NaN values are instead set to 0 ###
         flags = flag_mask
-        flags[flag_mask == np.nan] = 0
+        flags[np.isnan(flag_mask)] = 0
         tod_fft = fft.rfft(tod_clean*flags, axis=0)
         freqs   = fft.rfftfreq(n_samps, d=1.0 / sample_rate)
         tod_fft[freqs < highpass_hz, :] = 0.0

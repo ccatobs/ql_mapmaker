@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from spt3g import core
 
 from .pointing import precompute_det_directions, boresight_to_radec, det_radec_from_boresight
-from .signal import iq_to_df, iq_to_df_hybrid
+from .signal import iq_to_df, iq_to_df_hybrid, normalize_tod
 
 
 @dataclass
@@ -309,13 +309,25 @@ def _iter_simulation_chunks(files: list, file_fmt: str, apply_offsets: bool = Tr
             )
 
 # ── Real BLAST-TNG format helpers ────────────────────────────────────────────
-#
-# Raw I/Q + calibration sweeps -> df, via signal.iq_to_df / iq_to_df_hybrid.
-# ra/dec are assumed already computed upstream (e.g. blasttng-to-g3's
-# add_radec_so3g) and read directly from the frame -- no az/el astrometry
-# happens here. Per-detector focal-plane offsets aren't known yet, so
-# chunk.ra/dec (per-detector) always come back None for this format; only
-# boresight pointing (ra_bore/dec_bore) is populated.
+
+
+def _interp_to_length(a: np.ndarray, n_new: int) -> np.ndarray:
+    """
+    Index-based linear interpolation, stretching/compressing `a` to `n_new`
+    samples.
+
+    Pointing telemetry and KID readout are commonly sampled at different
+    native rates within the same frame (confirmed on real BLAST-TNG data:
+    ra/dec at 1428 samples/frame vs I/Q at 1510). This assumes both span the
+    same real time range uniformly within the frame same convention as
+    the original notebook's alignMasterAndRoachTods.
+    """
+    if len(a) == n_new:
+        return a
+    x_old = np.arange(len(a))
+    x_new = np.linspace(0, len(a) - 1, n_new)
+    return np.interp(x_new, x_old, a)
+
 
 def _load_blasttng_calibration(frame, target_sweeps_key: str = "target_sweeps"):
     """
@@ -325,10 +337,15 @@ def _load_blasttng_calibration(frame, target_sweeps_key: str = "target_sweeps"):
     "<kid>_Q", "<kid>_F" for each detector's calibration sweep -- same
     convention as external/blasttng-to-g3's g3_utils/signal.py.
 
-    Returns
-    -------
-    kids          : list of str
-    target_sweeps : dict {kid: (If, Qf, Ff) arrays}
+    Also reads pre-baked per-detector "ra_shifts"/"dec_shifts" from the
+    calibration frame which were done by Jonah, if present (as written by g3_packager, see
+    external/blasttng-to-g3/g3_packager/frame_generators.py's
+    get_kid_shifts, sourced from a one-off empirical shift table). 
+    
+    NOTE : These
+    aren't guaranteed to exist for every dataset; callers should fall back
+    to computing shifts themselves (e.g. via the per-detector pass) when
+    baked_shifts comes back None.
     """
     target_sweeps_map = frame[target_sweeps_key]
     kids = sorted({name[:-2] for name in target_sweeps_map.keys()})
@@ -340,12 +357,74 @@ def _load_blasttng_calibration(frame, target_sweeps_key: str = "target_sweeps"):
         Ff = np.array(target_sweeps_map[f"{kid}_F"])
         target_sweeps[kid] = (If, Qf, Ff)
 
-    return kids, target_sweeps
+    baked_shifts = None
+    if "ra_shifts" in frame and "dec_shifts" in frame:
+        ra_shifts_map  = frame["ra_shifts"]
+        dec_shifts_map = frame["dec_shifts"]
+        baked_shifts = {
+            kid: (ra_shifts_map[kid] / core.G3Units.deg, dec_shifts_map[kid] / core.G3Units.deg)
+            for kid in kids if kid in ra_shifts_map and kid in dec_shifts_map
+        }
+
+    return kids, target_sweeps, baked_shifts
+
+
+def get_blasttng_baked_shifts(cfg: dict) -> Optional[dict]:
+    """
+    Peek at the first blasttng .g3 file's calibration frame for pre-baked
+    per-detector ra_shifts/dec_shifts, without iterating the whole file.
+    """
+    if cfg["data"]["format"] != "blasttng":
+        return None
+
+    files = []
+    for pattern in cfg["data"]["input_dirs"]:
+        for d in sorted(glob.glob(pattern)):
+            files.extend(sorted(pathlib.Path(d).rglob("*.g3")))
+    if not files:
+        return None
+
+    for frame in core.G3File(str(files[0])):
+        if frame.type == core.G3FrameType.Calibration:
+            _, _, baked_shifts = _load_blasttng_calibration(frame)
+            return baked_shifts
+    return None
+
+
+def _load_blasttng_cal_lamp_df(frame, kids, target_sweeps, iq_key: str = "cal_lamp_data",
+                               df_method: str = "hybrid", threshold_frac: float = 0.05):
+    """
+    Compute each detector's df timestream during the calibration-lamp
+    exposure, for use as the reference in signal.normalize_tod.
+    """
+    if iq_key not in frame:
+        return None
+
+    super_ts = frame[iq_key]
+    names    = np.asarray(super_ts.names)
+
+    cal_lamp_df = {}
+    for kid in kids:
+        i_matches = np.where(names == f"{kid}_I")[0]
+        q_matches = np.where(names == f"{kid}_Q")[0]
+        if len(i_matches) == 0 or len(q_matches) == 0:
+            continue  # this kid isn't in the cal-lamp exposure; skip it
+        I = np.asarray(super_ts.data[i_matches[0]], dtype=float)
+        Q = np.asarray(super_ts.data[q_matches[0]], dtype=float)
+        If, Qf, Ff = target_sweeps[kid]
+
+        if df_method == "hybrid":
+            df, _ = iq_to_df_hybrid(I, Q, If, Qf, Ff, threshold_frac=threshold_frac)
+        else:
+            df = iq_to_df(I, Q, If, Qf, Ff)
+        cal_lamp_df[kid] = np.nan_to_num(df, nan=0.0)
+
+    return cal_lamp_df
 
 
 def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
                             iq_key: str = "data", df_method: str = "hybrid",
-                            threshold_frac: float = 0.05):
+                            threshold_frac: float = 0.05, cal_lamp_df: dict = None):
     """
     Convert one real-data scan frame into a frame-level Chunk.
 
@@ -353,6 +432,7 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
     (same convention as the calibration sweep). Each detector's I/Q is
     converted to fractional frequency shift (df) against its own
     calibration sweep.
+
     """
     super_ts = frame[iq_key]
     names    = np.asarray(super_ts.names)
@@ -374,8 +454,27 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
             df = iq_to_df(I, Q, If, Qf, Ff)
         sig[:, i] = df
 
+    # Real BLAST-TNG readout has brief dropouts where every channel's raw I/Q
+    # goes NaN simultaneously (confirmed on roach1_pass3.g3: ~5% of samples,
+    # present in every single frame ) iq_to_df_hybrid correctly propagates that NaN
+    # through, so it needs handling here before signal reaches anything else.
+    
+    sig = np.nan_to_num(sig, nan=0.0)
+
+    # Normalize each detector against its own cal-lamp exposure (median-zero,
+    # cal-lamp-peak-scaled), matches g3_utils.signal.NormalizeDF
+    # (Without this, every
+    # detector's raw sensitivity differs (depends on that resonator's own
+    # coupling/quality factor)
+    if cal_lamp_df is not None:
+        for i, kid in enumerate(kids):
+            if kid in cal_lamp_df:
+                sig[:, i] = normalize_tod(sig[:, i], cal_lamp_df[kid])
+
     ra_bore  = np.array(frame["ra"])  / core.G3Units.deg
     dec_bore = np.array(frame["dec"]) / core.G3Units.deg
+    ra_bore  = _interp_to_length(ra_bore, n_samps)
+    dec_bore = _interp_to_length(dec_bore, n_samps)
 
     t_start = super_ts.times[0].time  / core.G3Units.s
     t_stop  = super_ts.times[-1].time / core.G3Units.s
@@ -397,16 +496,22 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
 
 
 def _iter_blasttng_chunks(files: list, iq_key: str = "data", target_sweeps_key: str = "target_sweeps",
+                          cal_lamp_key: str = "cal_lamp_data",
                           df_method: str = "hybrid", threshold_frac: float = 0.05) -> Iterator[Chunk]:
     """Yield one frame-level Chunk per scan frame from real BLAST-TNG-format .g3 files."""
     kids = None
     target_sweeps = None
+    cal_lamp_df = None
     sample_rate_ref = [None]
 
     for path in files:
         for frame in core.G3File(str(path)):
             if frame.type == core.G3FrameType.Calibration:
-                kids, target_sweeps = _load_blasttng_calibration(frame, target_sweeps_key)
+                kids, target_sweeps, _baked_shifts = _load_blasttng_calibration(frame, target_sweeps_key)
+                cal_lamp_df = _load_blasttng_cal_lamp_df(
+                    frame, kids, target_sweeps, iq_key=cal_lamp_key,
+                    df_method=df_method, threshold_frac=threshold_frac,
+                )
             elif frame.type == core.G3FrameType.Scan:
                 if kids is None:
                     raise RuntimeError(
@@ -416,6 +521,7 @@ def _iter_blasttng_chunks(files: list, iq_key: str = "data", target_sweeps_key: 
                 yield _blasttng_scan_to_chunk(
                     frame, kids, target_sweeps, sample_rate_ref,
                     iq_key=iq_key, df_method=df_method, threshold_frac=threshold_frac,
+                    cal_lamp_df=cal_lamp_df,
                 )
 
 
@@ -424,18 +530,6 @@ def _iter_blasttng_chunks(files: list, iq_key: str = "data", target_sweeps_key: 
 def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
     """
     Yield fixed-duration Chunks from the files specified in cfg.
-
-    Time windowing — all three from config.toml [pipeline]:
-      chunk_duration_s  seconds of data per Chunk (default 1.0 s)
-      start_offset_s    skip this many seconds at the start of the observation
-      max_duration_s    stop after this many seconds (measured after the offset)
-
-    Example: start_offset_s=100, max_duration_s=200 → process seconds 100–300.
-
-    apply_offsets : if False, chunk.ra/dec come back as None — detector focal-plane
-                    offsets are not applied, only boresight pointing (ra_bore/dec_bore/
-                    boresight_q) is available. Use this when offsets aren't known yet
-                    (real data before calibration) or for blind pointing reconstruction.
     """
     files = []
     file_fmt = cfg["data"]["file_format"]
@@ -461,6 +555,7 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
             files,
             iq_key=blasttng_cfg.get("iq_key", "data"),
             target_sweeps_key=blasttng_cfg.get("target_sweeps_key", "target_sweeps"),
+            cal_lamp_key=blasttng_cfg.get("cal_lamp_key", "cal_lamp_data"),
             df_method=blasttng_cfg.get("df_method", "hybrid"),
             threshold_frac=blasttng_cfg.get("threshold_frac", 0.05),
         )

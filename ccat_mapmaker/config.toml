@@ -4,19 +4,22 @@
 
 [data]
 # Glob patterns expanded recursively for *.g3 and *.h5 files.
-input_dirs = ["/projects/ccat/prime-cam/vgrecu_tests/primecam_sims_planetobs/ccat_datacenter_mock/mockdata/planet_ATMdata_d100/sim_PCAM280_h5_Jupiter_d100/Jupiter-*-*"]
+input_dirs = ["/home/player1/map_making_audrey/roach1_data"]
 
 # "simulation" -- TOAST simulation files (quaternion pointing, compressed signal)
 # "blasttng"   -- BLAST-TNG g3 files (raw I/Q -> df via signal.py; ra/dec assumed
 #                 already computed upstream, e.g. by blasttng-to-g3's add_radec_so3g)
-file_format = "h5"
-format = "simulation"
+file_format = "g3"
+format = "blasttng"
 
 
 [blasttng]
 # Only used when [data] format = "blasttng".
-iq_key            = "data"           # G3SuperTimestream key for raw I/Q in scan frames
-target_sweeps_key = "target_sweeps"  # G3TimestreamMap key for calibration sweeps in the calibration frame
+iq_key            = "data"             # G3SuperTimestream key for raw I/Q in scan frames
+target_sweeps_key = "target_sweeps"    # G3TimestreamMap key for calibration sweeps in the calibration frame
+cal_lamp_key      = "cal_lamp_data"    # G3SuperTimestream key for the cal-lamp I/Q exposure in the
+                                        # calibration frame, used to normalize each detector (see signal.normalize_tod).
+                                        # If absent, signal is left unnormalized rather than failing.
 
 # "hybrid" -- fast gradient method near resonance, falls back to the accurate
 #             IQ-angle method further out (see mapmaker/signal.py)
@@ -28,12 +31,18 @@ threshold_frac = 0.05   # iq_to_df_hybrid: fraction of sweep bandwidth beyond wh
 [map]
 # Map centre in celestial coordinates (degrees).
 # If omitted, auto-detected as mean boresight position.
-ra0_deg  = 142.0
-dec0_deg = 15.6
+# Pinned to RCW 92's SIMBAD J2000 position (15h18m39.1s, -56d38'49") --
+# auto-detected mean-boresight centering put the map ~1.34 deg away from the
+# source, since the scan leg's *average* position isn't the same as its
+# closest approach to the target.
+ra0_deg  = 229.663
+dec0_deg = -56.649
 
 # Map extent (degrees) and pixel size (arcminutes).
-xlen_deg   = 1.0
-ylen_deg   = 1.0
+# Matches blasttng-to-g3/profiling/mapmaker.py's map_args exactly -- that's
+# the existing, working reference script for this same roach1_pass3.g3 file.
+xlen_deg   = 2.5
+ylen_deg   = 1.3
 res_arcmin = 0.25
 
 # If true, run an extra boresight-only naive pass and save a side-by-side
@@ -44,10 +53,13 @@ compare_boresight = false
 [pipeline]
 # Common-mode subtraction iterations after the naive map.
 # 0 = naive map only, 3-5 = good balance of quality vs runtime.
-n_iterations = 4
+n_iterations = 6
 
 # Time window: skip start_offset_s seconds, then process max_duration_s seconds.
 # Comment out max_duration_s to process the full observation.
+# Reverted to the full file -- the reference profiling/mapmaker.py script
+# runs roach1_pass3.g3 whole, no time-windowing, and relies on a wide enough
+# map (see [map] xlen_deg/ylen_deg) rather than hunting for a specific slice.
 start_offset_s = 0
 #max_duration_s = 0
 
@@ -56,7 +68,7 @@ start_offset_s = 0
 chunk_duration_s = 1.0
 
 # Cosmic ray spike removal.
-clean_cosmic_rays = true
+clean_cosmic_rays = false
 # fill_them_noise = noisy polynomial or linear
 # how many samples (likely 5 samples)
 # build array of sample noise in loading, take varying noise everytime we need it
@@ -72,14 +84,39 @@ time_chunk_size = 0
 # Detector exclusion from the combined map.
 # auto_exclude_threshold: flag detectors with std > N * median std across all detectors.
 # Set to 0 to disable auto-exclusion.
-auto_exclude_threshold = 5.0
-exclude_detectors      = []   # e.g. ["PC_f280_A_001"]
+auto_exclude_threshold = 0
+# Jonah's known-bad roach1 KID list from blasttng-to-g3/profiling/mapmaker.py
+# (kid_rejects, converted to names via ut.kid_string(id, roach_id=1)) -- named
+# rather than indexed, since list-position in our kid list isn't guaranteed to
+# match the raw KID number if any channels are missing from the calibration data.
+exclude_detectors = ["roach1_0333"]
+# exclude_detectors = [
+#    "roach1_0011", "roach1_0021", "roach1_0057", "roach1_0081", "roach1_0111",
+#    "roach1_0127", "roach1_0147", "roach1_0148", "roach1_0149", "roach1_0150",
+#    "roach1_0151", "roach1_0152", "roach1_0154", "roach1_0158", "roach1_0170",
+#    "roach1_0181", "roach1_0182", "roach1_0192", "roach1_0195", "roach1_0211",
+#    "roach1_0223", "roach1_0225", "roach1_0245", "roach1_0263", "roach1_0282",
+#    "roach1_0286", "roach1_0293", "roach1_0297", "roach1_0319", "roach1_0327",
+ #   "roach1_0331", "roach1_0333", "roach1_0334", "roach1_0336", "roach1_0337",
+  #  "roach1_0340", "roach1_0341", "roach1_0349", "roach1_0352",
+#]
 exclude_detector_indices = [] # e.g. [0, 5, 100]
+
+# wnf_exclude_sigma: additional automatic exclusion based on each detector's
+# white-noise-floor (median PSD in a 0.4-0.9x Nyquist band). Cutoff is
+# log-median + N*sigma of log10(white_noise_floor), NOT a linear N*median --
+# this metric is extremely heavy-tailed (75th percentile can already be ~7x
+# the median), so a linear cutoff excludes an arbitrary large fraction of the
+# array instead of catching real outliers. See blasttng_flagging_
+# characterization.ipynb Section 8, and Chapin et al. 2013 (SCUBA-2/SMURF)
+# Section 3.1.6 for the same technique applied to bolometer white noise.
+# Set to 0 to disable.
+wnf_exclude_sigma = 3.0
 
 
 [output]
 output_dir = "output"
-obs_object = "jupiter"
+obs_object = "RCW92"
 save_numpy = true
 save_png   = true
 

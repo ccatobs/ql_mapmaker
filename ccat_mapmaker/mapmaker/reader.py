@@ -391,6 +391,36 @@ def get_blasttng_baked_shifts(cfg: dict) -> Optional[dict]:
     return None
 
 
+def get_blasttng_site(cfg: dict):
+    """
+    Peek at the first blasttng .g3 file's first scan frame for the gondola's
+    lat/lon/alt telemetry (same keys blasttng-to-g3's coords.add_radec_so3g
+    reads), and return the middle-of-frame position as an astropy
+    EarthLocation. Returns None if no lat/lon/alt telemetry is present.
+    """
+    if cfg["data"]["format"] != "blasttng":
+        return None
+
+    from astropy.coordinates import EarthLocation
+    import astropy.units as u
+
+    files = []
+    for pattern in cfg["data"]["input_dirs"]:
+        for d in sorted(glob.glob(pattern)):
+            files.extend(sorted(pathlib.Path(d).rglob("*.g3")))
+    if not files:
+        return None
+
+    for frame in core.G3File(str(files[0])):
+        if frame.type == core.G3FrameType.Scan and all(k in frame for k in ("lat", "lon", "alt")):
+            mid     = len(frame["lat"]) // 2
+            lat_deg = frame["lat"][mid] / core.G3Units.deg
+            lon_deg = frame["lon"][mid] / core.G3Units.deg
+            alt_m   = frame["alt"][mid] / core.G3Units.m
+            return EarthLocation(lat=lat_deg * u.deg, lon=lon_deg * u.deg, height=alt_m * u.m)
+    return None
+
+
 def _load_blasttng_cal_lamp_df(frame, kids, target_sweeps, iq_key: str = "cal_lamp_data",
                                df_method: str = "hybrid", threshold_frac: float = 0.05):
     """

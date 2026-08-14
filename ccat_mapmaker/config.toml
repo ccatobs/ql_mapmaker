@@ -30,13 +30,27 @@ threshold_frac = 0.05   # iq_to_df_hybrid: fraction of sweep bandwidth beyond wh
 
 [map]
 # Map centre in celestial coordinates (degrees).
-# If omitted, auto-detected as mean boresight position.
+# Priority: ra0_deg/dec0_deg (if both set) > target > auto (mean boresight).
+#
 # Pinned to RCW 92's SIMBAD J2000 position (15h18m39.1s, -56d38'49") --
 # auto-detected mean-boresight centering put the map ~1.34 deg away from the
 # source, since the scan leg's *average* position isn't the same as its
 # closest approach to the target.
 ra0_deg  = 229.663
 dec0_deg = -56.649
+
+# Alternative to manual ra0_deg/dec0_deg: resolve the centre from a name
+# instead (see mapmaker/target.py). Ignored while ra0_deg/dec0_deg above are
+# both set, comment those out to use this.
+#   - Solar-system bodies ("jupiter", "saturn", "moon", "sun", ...) move, so
+#     they're looked up via ephemeris at the observation's start time from an
+#     observer site so FYST for simulation, or the gondola's own lat/lon/alt
+#     telemetry for real BLAST-TNG data (a balloon flight has no fixed site).
+#     Useful since planets are used as calibration sources.
+#   - Anything else is resolved by name via SkyCoord.from_name (SIMBAD,
+#     requires network access), e.g. "RCW 92" same as in Jonah's code
+#     external/map_making_blasttng_jl/map_maker_iterative uses.
+# target = "Jupiter"
 
 # Map extent (degrees) and pixel size (arcminutes).
 # Matches blasttng-to-g3/profiling/mapmaker.py's map_args exactly -- that's

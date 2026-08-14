@@ -35,11 +35,12 @@ from scipy.signal import periodogram
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from mapmaker.reader      import iter_chunks, get_blasttng_baked_shifts
+from mapmaker.reader      import iter_chunks, get_blasttng_baked_shifts, get_blasttng_site
 from mapmaker.cleaning    import clean_tod
 from mapmaker.binning     import make_map_edges, bin_chunk, bin_detector
 from mapmaker.common_mode import estimate_common_mode, subtract_common_mode, iterate_common_mode
 from mapmaker               import output
+from mapmaker               import target
 
 
 def resolve_paths(cfg: dict, config_path: pathlib.Path) -> dict:
@@ -542,9 +543,25 @@ def main():
     print(f"  Duration   : {obs_info['duration_s']:.1f} s")
     print(f"  Detectors  : {obs_info['n_detectors']} @ {obs_info['sample_rate_hz']:.1f} Hz")
 
-    ra0_deg  = map_cfg["ra0_deg"]  if centre_pinned else ra0_auto
-    dec0_deg = map_cfg["dec0_deg"] if centre_pinned else dec0_auto
-    centre_source = "config" if centre_pinned else "auto (mean boresight)"
+    target_name = map_cfg.get("target")
+    if centre_pinned:
+        ra0_deg, dec0_deg = map_cfg["ra0_deg"], map_cfg["dec0_deg"]
+        centre_source = "config"
+    elif target_name:
+        site = None
+        if target.is_solar_system_body(target_name):
+            site = (get_blasttng_site(cfg) if cfg["data"]["format"] == "blasttng"
+                    else target.FYST_SITE)
+            if site is None:
+                raise RuntimeError(
+                    f"Can't resolve target '{target_name}': no lat/lon/alt telemetry "
+                    f"found in the data to compute its ephemeris position."
+                )
+        ra0_deg, dec0_deg = target.resolve_target(target_name, obs_info["t_start_g3s"], site=site)
+        centre_source = f"target lookup ({target_name})"
+    else:
+        ra0_deg, dec0_deg = ra0_auto, dec0_auto
+        centre_source = "auto (mean boresight)"
 
     ra_edges, dec_edges = make_map_edges(
         ra0_deg=ra0_deg, dec0_deg=dec0_deg,

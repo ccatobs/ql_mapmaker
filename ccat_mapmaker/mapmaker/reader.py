@@ -1,15 +1,30 @@
 # ============================================================================ #
 # reader.py
 #
-# Reads .g3 files and yields fixed-duration Chunk objects for the pipeline.
+# Audrey Yang, audyang@student.ubc.ca
+# Vlad Grecu, vlad.grecu07@gmail.com
+# CCAT August 2026
 #
-# G3 file structure (simulation format):
-#   Calibration frame (first): focal-plane detector names + offset quaternions.
-#   Scan frames (many):        compressed signal + boresight quaternions.
+# Reads .g3 and .h5 files and yields fixed-duration Chunk objects for the
+# pipeline. Three source formats, three ingestion paths:
 #
-# G3 frames have variable sample counts. iter_g3_chunks rebuffers them into
-# fixed-duration chunks (chunk_duration_s) so downstream code always gets a
-# predictable amount of data. All arrays are time-first: (n_samps, n_dets).
+#   g3 simulation (TOAST output):
+#     Calibration frame (first): focal-plane detector names + offset quats.
+#     Scan frames (many):        compressed signal + boresight quaternions.
+#     G3 is a streamed format with no random access, so frames have variable
+#     sample counts and get rebuffered into fixed-duration chunks by _rechunk.
+#
+#   h5 simulation (TOAST output):
+#     Same content as g3 simulation, but HDF5 datasets support direct index
+#     slicing so chunks are read straight off disk (_iter_h5_simulation_chunks),
+#     no frame buffering needed.
+#
+#   g3 blasttng (real BLAST-TNG data):
+#     Calibration frame: per-KID target sweeps (+ optional cal-lamp exposure).
+#     Scan frames: raw I/Q, converted to df against each KID's sweep.
+#     Also streamed, so also goes through _rechunk.
+#
+# All arrays are time-first: (n_samps, n_dets).
 # ============================================================================ #
 
 import io
@@ -19,7 +34,6 @@ from typing import Iterator, Optional
 
 import numpy as np
 import h5py
-import h5py as h5
 from dataclasses import dataclass
 from spt3g import core
 
@@ -35,7 +49,12 @@ class Chunk:
 
     kids[j] is the name of the detector in column j of signal, ra, dec.
     t_start / t_stop are in seconds since the G3 epoch (Jan 1 2001).
-    common_mode and flags start as None; populated downstream if needed.
+    common_mode starts as None; populated downstream if needed.
+
+    flags is a per-(sample, detector) bitmask: 0 = good, nonzero = flagged.
+    Different flagging features OR their own bit into a sample's value, so a
+    sample can carry more than one reason at once; consumers that don't care
+    which reason should test `flags != 0`, not `flags == 1`.
     """
     kids:         list
     signal:       np.ndarray          # (n_samps, n_dets)
@@ -48,150 +67,19 @@ class Chunk:
     t_stop:       float
     sample_rate:  float               # Hz
     chunk_index:  int
-    flags:        np.ndarray          # (n_samps, n_dets) bool
+    flags:        np.ndarray          # (n_samps, n_dets) int bitmask; 0 = good
     boresight_q:  Optional[np.ndarray] = None  # (n_samps, 4) scipy (x,y,z,w); for pointing reconstruction
     det_dirs:     Optional[dict] = None  # {name: (3,) array}; offset directions, for on-demand offset application
 
 
-# ── Simulation format helpers ──────────────────────────────────────────────────
+# ── Frame buffering (shared by streamed g3 formats) ─────────────────────────
+#
+# Both g3 ingestion paths (simulation and blasttng) below stream through this
+# to turn variable-length frames into fixed-duration Chunks. The h5
+# simulation path doesn't use it -- HDF5 datasets are randomly indexable, so
+# chunks are sliced directly from disk instead of buffered in memory.
 
-# Adapted from Bonnie Slocombe, https://github.com/bonnieslocombe/g3_mapmaking, mapmaker/g3mapmaker.py, QuickMapMaker.Process
-def _load_simulation_focalplane(file, file_fmt: str):
-    """
-    Extract detector names and precomputed pointing directions from a calibration frame.
-
-    The focalplane HDF5 table is embedded as a raw byte buffer, BytesIO lets
-    h5py open it in memory without writing to disk.
-
-    NOTE: This will need to be modified when the true offsets are known.
-
-    Returns
-    -------
-    det_names : list of str
-    det_quats : dict {name: (4,) array} — offset quaternions, vector-first (x,y,z,w)
-    det_dirs  : dict {name: (3,) array} — precomputed focal-plane directions
-    """
-    if file_fmt == 'g3':
-        fp_buffer = io.BytesIO(bytes(file["focalplane"]))
-        with h5py.File(fp_buffer, "r") as f:
-            det_names = [n.decode("utf-8") for n in f["focalplane"]["name"][:]]
-            quats     = f["focalplane"]["quat"][:]
-        det_quats = {name: quat for name, quat in zip(det_names, quats)}
-        dirs      = precompute_det_directions(quats)  # (n_dets, 3), computed once
-        det_dirs  = {name: dirs[i] for i, name in enumerate(det_names)}
-    elif file_fmt == 'h5':
-        with h5py.File(file, "r") as h5_file:
-            det_names = h5_file['instrument/focalplane']['name'].astype(str)
-            quats     = h5_file['instrument/focalplane']['quat']
-        det_quats = {name: quat for name, quat in zip(det_names, quats)}
-        dirs      = precompute_det_directions(quats)  # (n_dets, 3), computed once
-        det_dirs  = {name: dirs[i] for i, name in enumerate(det_names)}
-    return det_names, det_quats, det_dirs
-
-
-# Adapted from Bonnie Slocombe, https://github.com/bonnieslocombe/g3_mapmaking, mapmaker/g3mapmaker.py, QuickMapMaker.Process
-def _simulation_scan_to_chunk(path, det_names, det_dirs, sample_rate_ref, file_fmt, apply_offsets: bool = True):
-    """
-    Convert one simulation scan frame into a frame-level Chunk.
-
-    Signal is stored as compressed integers: true_signal = raw / gain + offset.
-    boresight_r is built once per frame and reused for all detectors.
-
-    sample_rate_ref : list[float | None] — single-element list to cache sample
-                      rate after the first frame (shared across all frames).
-    """
-    if file_fmt == 'g3':
-        frame = path
-        raw     = frame["signal"]
-        kids    = [k for k in det_names if k in raw.keys()]
-        n_dets  = len(kids)
-        n_samps = len(raw[kids[0]])
-    
-        boresight_q = np.asarray(frame["shared_boresight_radec"])
-    
-        sig     = np.zeros((n_samps, n_dets), dtype=float)
-        det_ra  = np.zeros((n_samps, n_dets), dtype=float) if apply_offsets else None
-        det_dec = np.zeros((n_samps, n_dets), dtype=float) if apply_offsets else None
-
-        ra_bore, dec_bore, boresight_r = boresight_to_radec(boresight_q)
-        boresight_q_scipy = boresight_q[:, [1, 2, 3, 0]]  # reorder w,x,y,z -> x,y,z,w (scipy)
-
-        for i, kid in enumerate(kids):
-            y_raw      = np.asarray(raw[kid], dtype=float)
-            gain_key   = f"compress_signal_{kid}_gain"
-            offset_key = f"compress_signal_{kid}_offset"
-            if gain_key in frame and offset_key in frame:
-                sig[:, i] = y_raw / float(frame[gain_key]) + float(frame[offset_key])
-            else:
-                sig[:, i] = y_raw
-
-            if apply_offsets:
-                det_ra[:, i], det_dec[:, i] = det_radec_from_boresight(boresight_r, det_dirs[kid])
-
-        ts      = raw[kids[0]]
-        t_start = ts.start.time / core.G3Units.s
-        t_stop  = ts.stop.time  / core.G3Units.s
-
-        if sample_rate_ref[0] is None:
-            sample_rate_ref[0] = n_samps / (t_stop - t_start)
-
-        return Chunk(
-            kids=kids, signal=sig, common_mode=None,
-            ra=det_ra, dec=det_dec,
-            ra_bore=ra_bore, dec_bore=dec_bore,
-            boresight_q=boresight_q_scipy,
-            det_dirs=det_dirs,
-            t_start=t_start, t_stop=t_stop,
-            sample_rate=sample_rate_ref[0], flags = flags.T,
-            chunk_index=-1,  # assigned by _rechunk
-        )
-
-    elif file_fmt == 'h5':
-        with h5.File(path, 'r') as h5_file:
-            raw     = h5_file["detdata/signal"]
-            flags   = np.copy(np.asarray(h5_file["detdata/flags"])) # Done this way to allow taking the transpose later on
-            # flags[:,0:100000] += 1  # Manually make timeslices bad
-            # flags[0:20,:] += 1 # Manually make detectors bad
-            n_dets  = len(raw)
-            n_samps = len(raw[0])
-            boresight_q = np.roll(np.asarray(h5_file["shared/boresight_radec"]), 1)  # raw (w,x,y,z), shape (n,4)
-
-            sig     = np.zeros((n_samps, n_dets), dtype=float)
-            det_ra  = np.zeros((n_samps, n_dets), dtype=float) if apply_offsets else None
-            det_dec = np.zeros((n_samps, n_dets), dtype=float) if apply_offsets else None
-
-            ra_bore, dec_bore, boresight_r = boresight_to_radec(boresight_q)
-            # boresight_q_scipy = boresight_q[:, [1, 2, 3, 0]]  # reorder w,x,y,z -> x,y,z,w (scipy)
-            boresight_q_scipy = boresight_q
-            
-            for i, kid in enumerate(det_names):
-                y_raw      = np.asarray(raw[i], dtype=float)
-                gain_key   = f"compress_signal_{kid}_gain"
-                offset_key = f"compress_signal_{kid}_offset"
-                sig[:, i] = y_raw
-
-                if apply_offsets:
-                    det_ra[:, i], det_dec[:, i] = det_radec_from_boresight(boresight_r, det_dirs[kid])
-
-            ts      = h5_file["shared/times"]
-            t_start = ts[0]
-            t_stop  = ts[-1]
-
-            if sample_rate_ref[0] is None:
-                sample_rate_ref[0] = n_samps / (t_stop - t_start)
-            chunk_returned = Chunk(
-                kids=det_names, signal=sig, common_mode=None,
-                ra=det_ra, dec=det_dec,
-                ra_bore=ra_bore, dec_bore=dec_bore,
-                boresight_q=boresight_q_scipy,
-                det_dirs=det_dirs,
-                t_start=t_start, t_stop=t_stop,
-                sample_rate=sample_rate_ref[0], flags = flags.T,
-                chunk_index=-1,  # assigned by _rechunk
-            )
-            return chunk_returned
-
-def _rechunk(frame_iter: Iterator[Chunk], chunk_duration_s: float, file_fmt: str) -> Iterator[Chunk]:
+def _rechunk(frame_iter: Iterator[Chunk], chunk_duration_s: float) -> Iterator[Chunk]:
     """
     Rebuffer variable-length frame-level Chunks into fixed-duration Chunks.
 
@@ -272,41 +160,204 @@ def _rechunk(frame_iter: Iterator[Chunk], chunk_duration_s: float, file_fmt: str
         )
 
 
-def _iter_simulation_chunks(files: list, file_fmt: str, apply_offsets: bool = True) -> Iterator[Chunk]:
-    """Yield one frame-level Chunk per scan frame from CCAT simulation files."""
+# ── G3 simulation format helpers ─────────────────────────────────────────────
+
+# Adapted from Bonnie Slocombe, https://github.com/bonnieslocombe/g3_mapmaking, mapmaker/g3mapmaker.py, QuickMapMaker.Process
+def _load_g3_focalplane(frame):
+    """
+    Extract detector names and precomputed pointing directions from a
+    g3 calibration frame.
+
+    The focalplane HDF5 table is embedded as a raw byte buffer, BytesIO lets
+    h5py open it in memory without writing to disk.
+
+    NOTE: This will need to be modified when the true offsets are known.
+
+    Returns
+    -------
+    det_names : list of str
+    det_quats : dict {name: (4,) array} — offset quaternions, vector-first (x,y,z,w)
+    det_dirs  : dict {name: (3,) array} — precomputed focal-plane directions
+    """
+    fp_buffer = io.BytesIO(bytes(frame["focalplane"]))
+    with h5py.File(fp_buffer, "r") as f:
+        det_names = [n.decode("utf-8") for n in f["focalplane"]["name"][:]]
+        quats     = f["focalplane"]["quat"][:]
+    det_quats = {name: quat for name, quat in zip(det_names, quats)}
+    dirs      = precompute_det_directions(quats)  # (n_dets, 3), computed once
+    det_dirs  = {name: dirs[i] for i, name in enumerate(det_names)}
+    return det_names, det_quats, det_dirs
+
+
+# Adapted from Bonnie Slocombe, https://github.com/bonnieslocombe/g3_mapmaking, mapmaker/g3mapmaker.py, QuickMapMaker.Process
+def _g3_simulation_scan_to_chunk(frame, det_names, det_dirs, sample_rate_ref, apply_offsets: bool = True):
+    """
+    Convert one g3 simulation scan frame into a frame-level Chunk.
+
+    Signal is stored as compressed integers: true_signal = raw / gain + offset.
+    boresight_r is built once per frame and reused for all detectors.
+
+    sample_rate_ref : list[float | None] — single-element list to cache sample
+                      rate after the first frame (shared across all frames).
+    """
+    raw     = frame["signal"]
+    kids    = [k for k in det_names if k in raw.keys()]
+    n_dets  = len(kids)
+    n_samps = len(raw[kids[0]])
+
+    boresight_q = np.asarray(frame["shared_boresight_radec"])
+
+    sig     = np.zeros((n_samps, n_dets), dtype=float)
+    det_ra  = np.zeros((n_samps, n_dets), dtype=float) if apply_offsets else None
+    det_dec = np.zeros((n_samps, n_dets), dtype=float) if apply_offsets else None
+
+    ra_bore, dec_bore, boresight_r = boresight_to_radec(boresight_q)
+    boresight_q_scipy = boresight_q[:, [1, 2, 3, 0]]  # reorder w,x,y,z -> x,y,z,w (scipy)
+
+    for i, kid in enumerate(kids):
+        y_raw      = np.asarray(raw[kid], dtype=float)
+        gain_key   = f"compress_signal_{kid}_gain"
+        offset_key = f"compress_signal_{kid}_offset"
+        if gain_key in frame and offset_key in frame:
+            sig[:, i] = y_raw / float(frame[gain_key]) + float(frame[offset_key])
+        else:
+            sig[:, i] = y_raw
+
+        if apply_offsets:
+            det_ra[:, i], det_dec[:, i] = det_radec_from_boresight(boresight_r, det_dirs[kid])
+
+    ts      = raw[kids[0]]
+    t_start = ts.start.time / core.G3Units.s
+    t_stop  = ts.stop.time  / core.G3Units.s
+
+    if sample_rate_ref[0] is None:
+        sample_rate_ref[0] = n_samps / (t_stop - t_start)
+
+    return Chunk(
+        kids=kids, signal=sig, common_mode=None,
+        ra=det_ra, dec=det_dec,
+        ra_bore=ra_bore, dec_bore=dec_bore,
+        boresight_q=boresight_q_scipy,
+        det_dirs=det_dirs,
+        t_start=t_start, t_stop=t_stop,
+        sample_rate=sample_rate_ref[0], flags=np.zeros((n_samps, n_dets), dtype=int),  # TODO: real flagging once available
+        chunk_index=-1,  # assigned by _rechunk
+    )
+
+
+def _iter_g3_simulation_chunks(files: list, apply_offsets: bool = True) -> Iterator[Chunk]:
+    """Yield one frame-level Chunk per scan frame from CCAT g3 simulation files."""
     det_names       = None
     det_dirs        = None
     sample_rate_ref = [None]
-    if file_fmt == 'g3':
-        for path in files:
-            for frame in core.G3File(str(path)):
-                if frame.type == core.G3FrameType.Calibration:
-                    det_names, _, det_dirs = _load_simulation_focalplane(frame, file_fmt)
-                elif frame.type == core.G3FrameType.Scan:
-                    if det_names is None:
-                        raise RuntimeError(
-                            "Scan frame encountered before calibration frame. "
-                            "Check that the first .g3 file contains a calibration frame."
-                        )
-                    yield _simulation_scan_to_chunk(
-                        frame, det_names, det_dirs, sample_rate_ref, file_fmt, apply_offsets
+    for path in files:
+        for frame in core.G3File(str(path)):
+            if frame.type == core.G3FrameType.Calibration:
+                det_names, _, det_dirs = _load_g3_focalplane(frame)
+            elif frame.type == core.G3FrameType.Scan:
+                if det_names is None:
+                    raise RuntimeError(
+                        "Scan frame encountered before calibration frame. "
+                        "Check that the first .g3 file contains a calibration frame."
                     )
-    elif file_fmt == 'h5':
-        for i, path in enumerate(files):
-            # with h5.File(path, 'r') as h5_file:
-            # print(f"h5_file: {h5_file}")
-            if i == 0:
-                try:
-                    det_names, _, det_dirs = _load_simulation_focalplane(path, file_fmt)
-                except RuntimeError:
-                    print("Not able to extract focalplane information.")
-            if det_names is None:
-                raise RuntimeError(
-                    "No detector information (detector names) found."
+                yield _g3_simulation_scan_to_chunk(
+                    frame, det_names, det_dirs, sample_rate_ref, apply_offsets
                 )
-            yield _simulation_scan_to_chunk(
-                path, det_names, det_dirs, sample_rate_ref, file_fmt, apply_offsets
-            )
+
+
+# ── HDF5 simulation format helpers ───────────────────────────────────────────
+
+def _load_h5_focalplane(path):
+    """
+    Extract detector names and precomputed pointing directions from an HDF5
+    simulation file's instrument/focalplane table.
+
+    NOTE: This will need to be modified when the true offsets are known.
+
+    Returns
+    -------
+    det_names : array of str
+    det_quats : dict {name: (4,) array} — offset quaternions, vector-first (x,y,z,w)
+    det_dirs  : dict {name: (3,) array} — precomputed focal-plane directions
+    """
+    with h5py.File(path, "r") as h5_file:
+        det_names = h5_file['instrument/focalplane']['name'].astype(str)
+        quats     = h5_file['instrument/focalplane']['quat']
+    det_quats = {name: quat for name, quat in zip(det_names, quats)}
+    dirs      = precompute_det_directions(quats)  # (n_dets, 3), computed once
+    det_dirs  = {name: dirs[i] for i, name in enumerate(det_names)}
+    return det_names, det_quats, det_dirs
+
+
+def _iter_h5_simulation_chunks(files: list, chunk_duration_s: float, apply_offsets: bool = True) -> Iterator[Chunk]:
+    """
+    Yield fixed-duration Chunks directly from HDF5 simulation files.
+
+    detdata/signal and detdata/flags are (n_dets, n_samps) on-disk datasets;
+    each chunk slices only its own [start:stop] sample window out of them via
+    h5py, so at most one chunk's worth of (n_dets, chunk_n) data is ever
+    materialized in memory. times/boresight_radec are (n_samps,)-sized
+    (detector-independent) so those are read in full per file -- cheap
+    regardless of chunk_duration_s since they don't scale with n_dets.
+
+    sample_rate is established once, from the first file, and reused for
+    every subsequent file's chunk_n (matches the previous _rechunk-based
+    behaviour, which also assumed one constant rate across the whole
+    observation). Chunks don't span file boundaries -- unlike _rechunk's
+    frame buffering, a file's leftover tail becomes its own short chunk
+    rather than being spliced onto the next file's head, since HDF5 files
+    aren't guaranteed contiguous in time the way consecutive g3 frames are.
+    """
+    det_names       = None
+    det_dirs        = None
+    sample_rate_ref = [None]
+    chunk_index     = 0
+
+    for path in files:
+        if det_names is None:
+            det_names, _, det_dirs = _load_h5_focalplane(path)
+
+        with h5py.File(path, 'r') as h5_file:
+            raw      = h5_file["detdata/signal"]    # (n_dets, n_samps), on-disk
+            flags_ds = h5_file["detdata/flags"]      # (n_dets, n_samps), on-disk
+            times    = np.asarray(h5_file["shared/times"])
+            n_samps  = len(times)
+
+            boresight_q = np.roll(np.asarray(h5_file["shared/boresight_radec"]), 1)  # raw (w,x,y,z), shape (n,4)
+            ra_bore, dec_bore, boresight_r = boresight_to_radec(boresight_q)
+
+            if sample_rate_ref[0] is None:
+                sample_rate_ref[0] = n_samps / (times[-1] - times[0])
+            sample_rate = sample_rate_ref[0]
+            chunk_n = max(1, int(chunk_duration_s * sample_rate)) if chunk_duration_s > 0 else n_samps
+
+            for start in range(0, n_samps, chunk_n):
+                stop = min(start + chunk_n, n_samps)
+
+                sig = np.asarray(raw[:, start:stop], dtype=float).T   # (n, n_dets)
+                flg = np.asarray(flags_ds[:, start:stop], dtype=int).T   # (n, n_dets)
+
+                det_ra = det_dec = None
+                if apply_offsets:
+                    det_ra  = np.zeros((stop - start, len(det_names)), dtype=float)
+                    det_dec = np.zeros((stop - start, len(det_names)), dtype=float)
+                    for i, kid in enumerate(det_names):
+                        det_ra[:, i], det_dec[:, i] = det_radec_from_boresight(
+                            boresight_r[start:stop], det_dirs[kid]
+                        )
+
+                yield Chunk(
+                    kids=det_names, signal=sig, common_mode=None,
+                    ra=det_ra, dec=det_dec,
+                    ra_bore=ra_bore[start:stop], dec_bore=dec_bore[start:stop],
+                    boresight_q=boresight_q[start:stop],
+                    det_dirs=det_dirs,
+                    t_start=times[start], t_stop=times[stop - 1],
+                    sample_rate=sample_rate, flags=flg,
+                    chunk_index=chunk_index,
+                )
+                chunk_index += 1
+
 
 # ── Real BLAST-TNG format helpers ────────────────────────────────────────────
 
@@ -340,8 +391,8 @@ def _load_blasttng_calibration(frame, target_sweeps_key: str = "target_sweeps"):
     Also reads pre-baked per-detector "ra_shifts"/"dec_shifts" from the
     calibration frame which were done by Jonah, if present (as written by g3_packager, see
     external/blasttng-to-g3/g3_packager/frame_generators.py's
-    get_kid_shifts, sourced from a one-off empirical shift table). 
-    
+    get_kid_shifts, sourced from a one-off empirical shift table).
+
     NOTE : These
     aren't guaranteed to exist for every dataset; callers should fall back
     to computing shifts themselves (e.g. via the per-detector pass) when
@@ -488,7 +539,7 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
     # goes NaN simultaneously (confirmed on roach1_pass3.g3: ~5% of samples,
     # present in every single frame ) iq_to_df_hybrid correctly propagates that NaN
     # through, so it needs handling here before signal reaches anything else.
-    
+
     sig = np.nan_to_num(sig, nan=0.0)
 
     # Normalize each detector against its own cal-lamp exposure (median-zero,
@@ -512,7 +563,7 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
     if sample_rate_ref[0] is None:
         sample_rate_ref[0] = n_samps / (t_stop - t_start)
 
-    flags = np.zeros((n_samps, n_dets), dtype=bool)  # TODO: real flagging once available
+    flags = np.zeros((n_samps, n_dets), dtype=int)  # TODO: real flagging once available
 
     return Chunk(
         kids=kids, signal=sig, common_mode=None,
@@ -563,22 +614,26 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
     """
     files = []
     file_fmt = cfg["data"]["file_format"]
-    if file_fmt == 'g3':
-        for pattern in cfg["data"]["input_dirs"]:
-            for d in sorted(glob.glob(pattern)):
-                files.extend(sorted(pathlib.Path(d).rglob(f"*.{file_fmt}")))
-                
-    elif file_fmt == 'h5':
-        for pattern in cfg["data"]["input_dirs"]:
-            files.extend(sorted(glob.glob(pattern)))
-    
+    for pattern in cfg["data"]["input_dirs"]:
+        for d in sorted(glob.glob(pattern)):
+            files.extend(sorted(pathlib.Path(d).rglob(f"*.{file_fmt}")))
+
     if not files:
         raise FileNotFoundError(
             f"No .{file_fmt} files found for patterns: {cfg['data']['input_dirs']}"
         )
     fmt = cfg["data"]["format"]
-    if fmt == "simulation":
-        frame_iter = _iter_simulation_chunks(files, file_fmt, apply_offsets)
+    chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
+    start_offset_s   = cfg["pipeline"].get("start_offset_s", 0.0)
+    max_duration_s   = cfg["pipeline"].get("max_duration_s", None)
+
+    if fmt == "simulation" and file_fmt == "h5":
+        # HDF5 datasets support direct index slicing, so chunks are read
+        # straight off disk -- no frame buffering/_rechunk needed here.
+        chunked_iter = _iter_h5_simulation_chunks(files, chunk_duration_s, apply_offsets)
+    elif fmt == "simulation":
+        frame_iter = _iter_g3_simulation_chunks(files, apply_offsets)
+        chunked_iter = _rechunk(frame_iter, chunk_duration_s)
     elif fmt == "blasttng":
         blasttng_cfg = cfg.get("blasttng", {})
         frame_iter = _iter_blasttng_chunks(
@@ -589,18 +644,15 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
             df_method=blasttng_cfg.get("df_method", "hybrid"),
             threshold_frac=blasttng_cfg.get("threshold_frac", 0.05),
         )
+        chunked_iter = _rechunk(frame_iter, chunk_duration_s)
     else:
         raise NotImplementedError(
             f"Data format '{fmt}' is not yet implemented. "
             f"Currently supported: 'simulation', 'blasttng'."
         )
 
-    chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
-    start_offset_s   = cfg["pipeline"].get("start_offset_s", 0.0)
-    max_duration_s   = cfg["pipeline"].get("max_duration_s", None)
-    
     t_obs_start = None
-    for chunk in _rechunk(frame_iter, chunk_duration_s, file_fmt):
+    for chunk in chunked_iter:
         if t_obs_start is None:
             t_obs_start = chunk.t_start
         elapsed = chunk.t_stop - t_obs_start

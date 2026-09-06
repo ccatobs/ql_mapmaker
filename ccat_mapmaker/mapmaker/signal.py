@@ -1,16 +1,18 @@
 # ============================================================================ #
 # signal.py
 #
-# Converting raw detector data into calibrated frequency-shift timestreams.
+# Audrey Yang, audyang@student.ubc.ca
+# Vlad Grecu, vlad.grecu07@gmail.com
+# CCAT August 2026
 #
-# Code based on algorithm developed and refined by Max Chapman (https://github.com/freermax9-gif/CCAT-MKID-)
+# Converting raw detector data into calibrated frequency-shift timestreams.
+# Code based on algorithm developed by James Burgoyne and refined by Max Chapman (https://github.com/freermax9-gif/CCAT-MKID-)
 # ============================================================================ #
 
 from typing import Optional
 import numpy as np
 
-
-# the hybrid method is a method that default uses a gradient method to estimate df from the I Q data. When the error is fraction of the sweep bandwidth beyond which the linear approximation is considered unreliable and the angle method is used instead (more accurate but slower). The threshold_frac parameter controls this threshold.
+# Hybrid method default uses a gradient method to estimate df from the I/Q data. When the error is fraction of the sweep bandwidth beyond which the linear approximation is considered unreliable and the angle method is used instead (more accurate but slower). The threshold_frac parameter controls this threshold. Further testing is needed to optimize the param
 
 def iq_to_df_hybrid(I: np.ndarray, Q: np.ndarray,
                      If: np.ndarray, Qf: np.ndarray, Ff: np.ndarray,
@@ -48,9 +50,9 @@ def iq_to_df_gradient(I: np.ndarray, Q: np.ndarray,
     dQf = np.diff(Qf)[i_grad] / 1e3
     denom = dIf ** 2 + dQf ** 2
 
-    df = ((I-If[i_f0]) * dIf + (Q-Qf[i_f0]) * dQf) / denom / Ff[i_f0]
+    df = ((I-If[i_f0]) * dIf + (Q-Qf[i_f0]) * dQf) / denom
 
-    return df
+    return df / Ff[i_f0]
 
 def iq_to_df(I: np.ndarray, Q: np.ndarray,
              If: np.ndarray, Qf: np.ndarray, Ff: np.ndarray,
@@ -63,7 +65,7 @@ def iq_to_df(I: np.ndarray, Q: np.ndarray,
     if i_f0 is None:
         i_f0 = np.argmin(np.abs(If + 1j * Qf))
 
-    # Centre of the IQ resonance circle (midpoint of sweep bounding box)
+    # Centre of the IQ resonance circle
     cI = (If.max() + If.min()) / 2
     cQ = (Qf.max() + Qf.min()) / 2
 
@@ -76,7 +78,6 @@ def iq_to_df(I: np.ndarray, Q: np.ndarray,
     df = np.interp(theta, theta_f, Ff0, period=2 * np.pi)
 
     return df / Ff[i_f0]
-
 
 
 def normalize_tod(tod_1d: np.ndarray, cal_lamp_tod_1d: np.ndarray) -> np.ndarray:

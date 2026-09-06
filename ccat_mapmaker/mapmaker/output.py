@@ -1,6 +1,10 @@
 # ============================================================================ #
 # output.py
 #
+# Audrey Yang, audyang@student.ubc.ca
+# Vlad Grecu, vlad.grecu07@gmail.com
+# CCAT August 2026
+#
 # Save map outputs to disk.
 # ============================================================================ #
 
@@ -152,7 +156,8 @@ def save_iteration_maps(naive: np.ndarray,
            (E[x^2] - E[x]^2) / hits, see run_mapmaker._streaming_pass.
     time_null:  half-difference of two chunk-split independent maps: should
            show no residual structure if the combined map's features are
-           real signal rather than noise (a jackknife/null test).
+           real signal rather than noise (a jackknife/null test). None if
+           run_mapmaker._streaming_pass(compute_time_null=False) -- skipped.
     raw_map: optional naive-style map (no common-mode) using manual+auto
              exclusion only, comparison reference against `naive`/cm_maps,
              which additionally exclude white-noise-floor outliers.
@@ -167,7 +172,9 @@ def save_iteration_maps(naive: np.ndarray,
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    all_maps = [("naive", naive)] + cm_maps + [("hits", hits), ("noise", noise), ("null", null)]
+    all_maps = [("naive", naive)] + cm_maps + [("hits", hits), ("noise", noise)]
+    if null is not None:
+        all_maps.append(("null", null))
     if raw_map is not None:
         all_maps.append(("raw", raw_map))
     if detsplit_null is not None:
@@ -185,7 +192,6 @@ def save_iteration_maps(naive: np.ndarray,
         sig_vmin, sig_vmax   = _global_scale(signal_maps)
         hits_vmin, hits_vmax = _percentile_scale(hits)
         noise_vmin, noise_vmax = _percentile_scale(noise)
-        null_vmin, null_vmax = _global_scale([("null", null)])
 
         for label, m in signal_maps:
             _plot_map(m, ra_edges, dec_edges,
@@ -199,11 +205,13 @@ def save_iteration_maps(naive: np.ndarray,
                       title="Raw Map (manual+auto exclusion only)",
                       cmap=CMAP_SIGNAL, vmin=sig_vmin, vmax=sig_vmax,
                       cbar_label="Signal")
-        _plot_map(null, ra_edges, dec_edges,
-                  filepath=output_dir / "time_null.png",
-                  title="Null Map (time chunk half-difference)",
-                  cmap=CMAP_NULL, vmin=null_vmin, vmax=null_vmax,
-                  cbar_label="Signal")
+        if null is not None:
+            null_vmin, null_vmax = _global_scale([("null", null)])
+            _plot_map(null, ra_edges, dec_edges,
+                      filepath=output_dir / "time_null.png",
+                      title="Null Map (time chunk half-difference)",
+                      cmap=CMAP_NULL, vmin=null_vmin, vmax=null_vmax,
+                      cbar_label="Signal")
         if detsplit_null is not None:
             ds_vmin, ds_vmax = _global_scale([("detsplit_null", detsplit_null)])
             _plot_map(detsplit_null, ra_edges, dec_edges,

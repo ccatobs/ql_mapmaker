@@ -1,13 +1,16 @@
 # ============================================================================ #
 # binning.py
 #
+# Audrey Yang, audyang@student.ubc.ca
+# Vlad Grecu, vlad.grecu07@gmail.com
+# CCAT August 2026
+#
 # Sky map pixelization: bin detector timestreams into a 2-D map.
 #
 # For each time sample, we know where the detector was pointing and what signal
 # it recorded. We divide the sky into a rectangular pixel grid and accumulate
 # signal from all samples that fell in each pixel. The map value per pixel is
-# the average of all signal samples that landed there, computed via
-# numpy's histogram2d.
+# the average of all signal samples that landed there, computed via numpy's histogram2d.
 # ============================================================================ #
 
 import numpy as np
@@ -37,6 +40,8 @@ def make_map_edges(ra0_deg: float, dec0_deg: float,
 
 # Adapted from Bonnie Slocombe, https://github.com/bonnieslocombe/g3_mapmaking, g3mapmaker.py, QuickMapMaker.Process
 # and Jonah Lee, https://github.com/jonahjlee/blasttng-to-g3, maps.py, MapBinner.__call__
+
+# This is only really used for the per detector maps right now
 def bin_detector(tod_1d: np.ndarray, flag_mask_1d: np.ndarray,
                  ra_1d: np.ndarray, dec_1d: np.ndarray,
                  ra_edges: np.ndarray, dec_edges: np.ndarray,
@@ -66,30 +71,30 @@ def bin_chunk(signal: np.ndarray, flag_mask: np.ndarray,
     Bin one Chunk's signal into a 2-D pixel map.
 
     Flattens all detectors and time samples into a single histogram2d call.
-    The caller accumulates (data, hits) across chunks to build the full map.
+    Accumulates (data, hits) across chunks to build the full map.
 
     signal  : (n_samps, n_dets) cleaned signal
     flags_mask: (n_sampls, n_dets) mask of signal
     ra, dec : (n_samps, n_dets) per-detector pointing in degrees
     weights : (n_dets,) optional per-detector weights; defaults to uniform
     Returns data, hits, and sumsq (weighted sum of signal**2), all shape (ny, nx).
-    sumsq lets the caller accumulate per-pixel variance (E[x^2] - E[x]^2) across
-    chunks for a real RMS noise map, instead of assuming unit variance per sample.
+    sumsq accumulates per-pixel variance (E[x^2] - E[x]^2) across chunks for a real RMS noise map.
+
+    Weighting is per-sample, not per-detector: a flagged sample drops only
+    itself from the map, not its detector's whole chunk (matches how
+    bin_detector already excludes samples one at a time).
     """
-    n_samps, n_dets = signal.shape
-    w = np.ones(n_dets, dtype=float) if weights is None else np.asarray(weights, dtype=float)
+    n_dets = signal.shape[1]
+    det_w = np.ones(n_dets, dtype=float) if weights is None else np.asarray(weights, dtype=float)
     flags = np.copy(flag_mask)
     flags[np.isnan(flags)] = 0
-    flags_det_mean = np.mean(flags, axis = 0)
-    flags_det_mean[np.isnan(flags_det_mean) == True] = 0
-    flags_det_mean[flags_det_mean < 1] = 0
-    w = w*flags_det_mean
+    w = flags * det_w[np.newaxis, :]  # (n_samps, n_dets): 0 where flagged, det_w elsewhere
 
-    sig_flat    = (signal * w[np.newaxis, :]).ravel()
-    sig_sq_flat = ((signal ** 2) * w[np.newaxis, :]).ravel()
+    sig_flat    = (signal * w).ravel()
+    sig_sq_flat = ((signal ** 2) * w).ravel()
     ra_flat     = ra.ravel()
     dec_flat    = dec.ravel()
-    w_flat      = np.tile(w, n_samps)
+    w_flat      = w.ravel()
 
     data, _, _ = np.histogram2d(dec_flat, ra_flat,
                                 bins=[dec_edges, ra_edges],

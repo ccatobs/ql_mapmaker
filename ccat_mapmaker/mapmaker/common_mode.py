@@ -1,15 +1,11 @@
 # ============================================================================ #
 # common_mode.py
 #
+# Audrey Yang, audyang@student.ubc.ca
+# Vlad Grecu, vlad.grecu07@gmail.com
+# CCAT August 2026
+#
 # Common-mode noise subtraction (naive and iterative).
-#
-# At any moment all detectors see the same atmosphere but different sky pixels.
-# Taking the mean across detectors estimates the atmosphere; subtracting it
-# leaves each detector's individual sky signal + uncorrelated noise.
-#
-# The complication: bright sources bleed into the mean and get partially
-# subtracted. The iterative approach fixes this by predicting the sky signal
-# from a previous map and removing it before estimating the atmosphere.
 # ============================================================================ #
 
 import numpy as np

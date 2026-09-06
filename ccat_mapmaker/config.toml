@@ -21,9 +21,9 @@ cal_lamp_key      = "cal_lamp_data"    # G3SuperTimestream key for the cal-lamp 
                                         # calibration frame, used to normalize each detector (see signal.normalize_tod).
                                         # If absent, signal is left unnormalized rather than failing.
 
-# "hybrid" -- fast gradient method near resonance, falls back to the accurate
+# "hybrid"    fast gradient method near resonance, falls back to the accurate
 #             IQ-angle method further out (see mapmaker/signal.py)
-# "angle"  -- always use the accurate (slower) IQ-angle method
+# "angle"     always use the accurate (slower) IQ-angle method
 df_method = "hybrid"
 threshold_frac = 0.05   # iq_to_df_hybrid: fraction of sweep bandwidth beyond which fallback triggers
 
@@ -65,9 +65,9 @@ compare_boresight = false
 
 
 [pipeline]
-# Common-mode subtraction iterations after the naive map.
-# 0 = naive map only, 3-5 = good balance of quality vs runtime.
-n_iterations = 6
+# ---------------------------------------------------------------- #
+# Chunking & time window
+# ---------------------------------------------------------------- #
 
 # Time window: skip start_offset_s seconds, then process max_duration_s seconds.
 # Comment out max_duration_s to process the full observation.
@@ -81,21 +81,32 @@ start_offset_s = 0
 # 0 or negative = one chunk per G3 frame.
 chunk_duration_s = 1.0
 
-# Cosmic ray spike removal.
-clean_cosmic_rays = false
-# fill_them_noise = noisy polynomial or linear
-# how many samples (likely 5 samples)
-# build array of sample noise in loading, take varying noise everytime we need it
-
-# High-pass filter cutoff (Hz). Removes atmospheric drift.
-# Disable for simulation data -- no atmosphere, filter distorts point-source signal.
-highpass_cutoff_hz = 0.0
-
 # Samples per map-binning pass. 0 = full timestream at once.
 # Set to ~10000 for the full CCAT array (~40k detectors) to cap peak memory.
 time_chunk_size = 0
 
-# Detector exclusion from the combined map.
+# ---------------------------------------------------------------- #
+# Common-mode & cleaning
+# ---------------------------------------------------------------- #
+
+# Common-mode subtraction iterations after the naive map.
+# 0 = naive map only, 3-5 = good balance of quality vs runtime.
+n_iterations = 6
+
+# Ordered list of cleaning steps applied to each chunk's timestream (see
+# mapmaker/cleaning.py CLEAN_STEPS). Available: "cosmic_rays", "highpass",
+# "notch". Add/remove/reorder freely -- each step is self-contained, with its
+# own [pipeline.<step>] config block below; clean_tod() doesn't need touching
+# to add a new step in the future (e.g. step correction).
+clean_steps = ["highpass"]
+# fill_them_noise = noisy polynomial or linear
+# how many samples (likely 5 samples)
+# build array of sample noise in loading, take varying noise everytime we need it
+
+# ---------------------------------------------------------------- #
+# Detector exclusion
+# ---------------------------------------------------------------- #
+
 # auto_exclude_threshold: flag detectors with std > N * median std across all detectors.
 # Set to 0 to disable auto-exclusion.
 auto_exclude_threshold = 0
@@ -126,6 +137,63 @@ exclude_detector_indices = [] # e.g. [0, 5, 100]
 # Section 3.1.6 for the same technique applied to bolometer white noise.
 # Set to 0 to disable.
 wnf_exclude_sigma = 3.0
+
+# ---------------------------------------------------------------- #
+# Map weighting
+# ---------------------------------------------------------------- #
+
+# Per-detector map weight = 1/white_noise_floor (inverse-variance), using the
+# same whole-observation estimate as wnf_exclude_sigma above -- quieter
+# detectors count for more in the combined map. Capped at weight_cap_factor x
+# the median weight so one anomalously-quiet detector can't dominate the map;
+# detectors with no usable white_noise_floor estimate fall back to the
+# median weight. Set to 0 to disable (uniform weighting, every detector
+# counts equally).
+weight_cap_factor = 5.0
+
+# ---------------------------------------------------------------- #
+# Diagnostics
+# ---------------------------------------------------------------- #
+
+# Jackknife/null-test maps -- both are diagnostics for checking that
+# apparent map features are real signal, not noise, and can be turned off
+# independently of each other and of the hits/noise (RMS) maps, which are
+# always computed.
+#   compute_time_null:     even/odd chunk-parity half-difference. Numerically
+#                           free (reuses the main bin_chunk result); disabling
+#                           it just skips its .npy/.png output.
+#   compute_detsplit_null: random 50/50 detector-identity half-difference.
+#                           Costs 2 extra bin_chunk calls per chunk -- the
+#                           one that's actually worth turning off for speed.
+compute_time_null     = true
+compute_detsplit_null = true
+
+# Narrowband PSD contaminants (unexplained lines, not necessarily at a mains
+# frequency -- e.g. AMKID's unidentified ~0.3 Hz feature, Reyes et al. 2026)
+# are flagged in metadata's "psd_anomalies" for follow-up, NOT removed from
+# the data. Threshold is sigma * MAD of the log-residual above a smoothed
+# continuum fit to the median PSD across detectors (see cleaning.
+# find_psd_anomalies). Set to 0 to disable.
+psd_anomaly_sigma = 5.0
+
+[pipeline.cosmic_rays]
+sigma = 3.5   # spike threshold, in units of sigma * std(tod)
+n     = 2     # samples masked on each side of a detected spike
+
+[pipeline.highpass]
+# Cutoff (Hz). Removes atmospheric drift. Disable (0.0) for simulation
+# data -- no atmosphere, filter distorts point-source signal.
+cutoff_hz = 0.0
+
+[pipeline.notch]
+# Line-frequency (mains) pickup + harmonics -- cables run at either 50 Hz or
+# 60 Hz depending on site, plus harmonics of that fundamental.
+# freq_hz = 0 auto-detects the fundamental per chunk from the dominant PSD
+# peak in the 45-65 Hz band (handles either 50 Hz or 60 Hz without needing to
+# know which in advance); set explicitly (e.g. 60.0) to force a fixed value.
+freq_hz      = 0
+n_harmonics  = 5     # includes the fundamental as harmonic 1
+bandwidth_hz = 1.0   # width of each notch
 
 
 [output]

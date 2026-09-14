@@ -1,31 +1,24 @@
 # ============================================================================ #
 # cleaning.py
 #
+# James Burgoyne, jburgoyne@phas.ubc.ca
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
 # CCAT August 2026
-#
-# Timestream cleaning: remove non-astronomical artifacts from detector data.
-#
-# Each cleaning step is a self-contained function registered in CLEAN_STEPS.
-# clean_tod() runs whichever steps the pipeline config names, in order -- to
-# add a new artifact-removal step (e.g. step correction), write one function
-# with the standard (tod, flag_mask, sample_rate, **params) -> (tod, flags)
-# signature (flags is a (n_samps, n_dets) int bitmask of newly-detected
-# reasons, or None if the step doesn't detect anything e.g. highpass/notch
-# are filters, not detectors), add it to CLEAN_STEPS, and reference it from
-# config.toml's clean_steps list. No changes to clean_tod itself are needed.
-#
-# Sources of contamination and where they're handled:
-#   Cosmic ray strikes   - sudden large spikes; removed here by interpolation
-#   Atmospheric noise    - slow low-frequency drift; removed here by high-pass filter
-#   Line pickup          - 50/60 Hz mains + harmonics; removed here by notch filter
-#   Correlated noise     - same across all detectors; handled by common_mode.py
-#   Unidentified narrowband contaminants - not removed, only flagged (see
-#     find_psd_anomalies) for follow-up analysis. Motivated by AMKID (Reyes
-#     et al. 2026) finding an unexplained ~0.3 Hz line that persisted after
-#     magnetic shielding
 # ============================================================================ #
+"""
+Timestream cleaning: remove artifacts from detector data.
+
+Each cleaning step is a self-contained function registered in CLEAN_STEPS. clean_tod() runs whichever steps the pipeline config names, in order -- to add a new artifact-removal step (e.g. step correction), write one function with the standard (tod, flag_mask, sample_rate, **params) -> (tod, flags) signature (flags is a (n_samps, n_dets) int bitmask of newly-detected reasons, or None if the step doesn't detect anything e.g. highpass/notch are filters, not detectors), add it to CLEAN_STEPS, and reference it from config.toml's clean_steps list. No changes to clean_tod itself are needed.
+
+Sources of contamination and where they're handled:
+  Cosmic ray strikes   - sudden large spikes; removed here by interpolation
+  Atmospheric noise    - slow low-frequency drift; removed here by high-pass filter
+  Line pickup          - 50/60 Hz mains + harmonics; removed here by notch filter
+  Correlated noise     - same across all detectors; handled by common_mode.py
+  Unidentified narrowband contaminants - not removed, only flagged (see    find_psd_anomalies) for follow-up analysis. Motivated by AMKID (Reyes et al. 2026) finding an unexplained ~0.3 Hz line that persisted after magnetic shielding
+"""
+
 
 import numpy as np
 from scipy.signal import medfilt
@@ -38,6 +31,9 @@ import scipy.fft as fft
 FLAG_COSMIC_RAY = 1 << 0
 
 
+# ============================================================================ #
+# remove_cosmic_rays
+# ============================================================================ #
 def remove_cosmic_rays(tod_1d: np.ndarray, flag_mask: np.ndarray,
                        sigma: float = 3.5,
                        n: int = 2) -> tuple[np.ndarray, np.ndarray]:
@@ -77,6 +73,9 @@ def remove_cosmic_rays(tod_1d: np.ndarray, flag_mask: np.ndarray,
     return tod, mask
 
 
+# ============================================================================ #
+# highpass_filter
+# ============================================================================ #
 def highpass_filter(tod_1d: np.ndarray,
                     sample_rate: float,
                     cutoff_hz: float) -> np.ndarray:
@@ -92,7 +91,11 @@ def highpass_filter(tod_1d: np.ndarray,
     tod_fft[freqs < cutoff_hz] = 0.0
     return fft.irfft(tod_fft, n=len(tod_1d))
 
+
+# ============================================================================ #
+# detect_line_freq
 # called in the notch filter function 
+# ============================================================================ #
 def detect_line_freq(tod: np.ndarray, sample_rate: float,
                      search_range_hz: tuple = (45.0, 65.0)) -> float:
     """
@@ -115,9 +118,10 @@ def detect_line_freq(tod: np.ndarray, sample_rate: float,
     return float(freqs[band][np.argmax(median_power)])
 
 
-
+# ============================================================================ #
+# highpass_filter
 # this method may not be useful for real data
-
+# ============================================================================ #
 def find_psd_anomalies(psd_avg: np.ndarray, psd_freqs: np.ndarray,
                        sigma: float = 5.0,
                        smooth_bins: int = 21,
@@ -202,6 +206,9 @@ def find_psd_anomalies(psd_avg: np.ndarray, psd_freqs: np.ndarray,
     return anomalies
 
 
+# ============================================================================ #
+# notch_filter
+# ============================================================================ #
 def notch_filter(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
                  freq_hz: float = 0.0,
                  n_harmonics: int = 5,
@@ -238,8 +245,11 @@ def notch_filter(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
     return fft.irfft(tod_fft, n=n_samps, axis=0)
 
 
+# ============================================================================ #
+# _step_cosmic_rays
 # based on Chapin_2013 where they apply a step correction
 # in progress, and not tested
+# ============================================================================ #
 def _step_cosmic_rays(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
                       sigma: float = 3.5, n: int = 2) -> tuple[np.ndarray, np.ndarray]:
     """CLEAN_STEPS wrapper: apply remove_cosmic_rays per detector."""
@@ -252,6 +262,9 @@ def _step_cosmic_rays(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float
     return tod_clean, new_flags
 
 
+# ============================================================================ #
+# _step_highpass
+# ============================================================================ #
 def _step_highpass(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
                    cutoff_hz: float = 0.5) -> tuple[np.ndarray, None]:
     """CLEAN_STEPS wrapper: brick-wall high-pass filter across the full array."""
@@ -268,6 +281,9 @@ def _step_highpass(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
     return fft.irfft(tod_fft, n=n_samps, axis=0), None
 
 
+# ============================================================================ #
+# _step_notch
+# ============================================================================ #
 def _step_notch(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
                 freq_hz: float = 0.0, n_harmonics: int = 5,
                 bandwidth_hz: float = 1.0) -> tuple[np.ndarray, None]:
@@ -284,6 +300,9 @@ CLEAN_STEPS = {
 }
 
 
+# ============================================================================ #
+# clean_tod
+# ============================================================================ #
 def clean_tod(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
               steps: list, step_params: dict | None = None) -> tuple[np.ndarray, np.ndarray]:
     """

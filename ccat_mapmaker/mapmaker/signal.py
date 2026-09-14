@@ -1,6 +1,7 @@
 # ============================================================================ #
 # signal.py
 #
+# jburgoyne@phas.ubc.ca
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
 # CCAT August 2026
@@ -14,6 +15,10 @@ import numpy as np
 
 # Hybrid method default uses a gradient method to estimate df from the I/Q data. When the error is fraction of the sweep bandwidth beyond which the linear approximation is considered unreliable and the angle method is used instead (more accurate but slower). The threshold_frac parameter controls this threshold. Further testing is needed to optimize the param
 
+
+# ============================================================================ #
+# iq_to_df_hybrid
+# ============================================================================ #
 def iq_to_df_hybrid(I: np.ndarray, Q: np.ndarray,
                      If: np.ndarray, Qf: np.ndarray, Ff: np.ndarray,
                      i_f0: Optional[int] = None, threshold_frac: float = 0.05,
@@ -28,14 +33,21 @@ def iq_to_df_hybrid(I: np.ndarray, Q: np.ndarray,
 
     df = iq_to_df_gradient(I, Q, If, Qf, Ff, i_f0=i_f0)
 
+    # TODO: switch this to use number of steps or something?
+    # Better would be fraction of FWHM, but might be expensive to calculate.
     bandwidth = Ff.max() - Ff.min()
     threshold = threshold_frac * bandwidth / Ff[i_f0]
     used_fallback = np.abs(df) > threshold
+
     if used_fallback.any():
         df[used_fallback] = iq_to_df(I[used_fallback], Q[used_fallback], If, Qf, Ff, i_f0=i_f0)
 
     return df, used_fallback
 
+
+# ============================================================================ #
+# iq_to_df_gradient
+# ============================================================================ #
 def iq_to_df_gradient(I: np.ndarray, Q: np.ndarray,
              If: np.ndarray, Qf: np.ndarray, Ff: np.ndarray,
              i_f0: int = None) -> np.ndarray:
@@ -54,6 +66,10 @@ def iq_to_df_gradient(I: np.ndarray, Q: np.ndarray,
 
     return df / Ff[i_f0]
 
+
+# ============================================================================ #
+# iq_to_df
+# ============================================================================ #
 def iq_to_df(I: np.ndarray, Q: np.ndarray,
              If: np.ndarray, Qf: np.ndarray, Ff: np.ndarray,
              i_f0: int = None) -> np.ndarray:
@@ -80,11 +96,15 @@ def iq_to_df(I: np.ndarray, Q: np.ndarray,
     return df / Ff[i_f0]
 
 
+# ============================================================================ #
+# normalize_tod
+# ============================================================================ #
 def normalize_tod(tod_1d: np.ndarray, cal_lamp_tod_1d: np.ndarray) -> np.ndarray:
     """
     Normalise a detector timestream so the median is 0 and the cal lamp peak is 1.
     Removes DC offset and puts all detectors on the same scale regardless of individual sensitivity differences.
     """
+    # TODO: This should NOT be used except with BLAST-TNG data!
     median_val = np.median(tod_1d)
     cal_peak   = np.max(cal_lamp_tod_1d)
 

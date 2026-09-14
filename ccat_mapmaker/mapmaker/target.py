@@ -1,6 +1,7 @@
 # ============================================================================ #
 # target.py
 #
+# James Burgoyne, jburgoyne@phas.ubc.ca
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
 # CCAT August 2026
@@ -22,10 +23,17 @@ _SOLAR_SYSTEM_BODIES = {
     "jupiter", "saturn", "uranus", "neptune",
 }
 
+
+# ============================================================================ #
+# is_solar_system_body
+# ============================================================================ #
 def is_solar_system_body(name: str) -> bool:
     return name.strip().lower() in _SOLAR_SYSTEM_BODIES
 
 
+# ============================================================================ #
+# resolve_target
+# ============================================================================ #
 def resolve_target(name: str, obs_time_unix: Optional[float] = None,
                    site: Optional[EarthLocation] = None) -> tuple[float, float]:
     """

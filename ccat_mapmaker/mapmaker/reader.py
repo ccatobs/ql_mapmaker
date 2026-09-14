@@ -1,31 +1,34 @@
 # ============================================================================ #
 # reader.py
 #
+# James Burgoyne, jburgoyne@phas.ubc.ca
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
 # CCAT August 2026
-#
-# Reads .g3 and .h5 files and yields fixed-duration Chunk objects for the
-# pipeline. Three source formats, three ingestion paths:
-#
-#   g3 simulation (TOAST output):
-#     Calibration frame (first): focal-plane detector names + offset quats.
-#     Scan frames (many):        compressed signal + boresight quaternions.
-#     G3 is a streamed format with no random access, so frames have variable
-#     sample counts and get rebuffered into fixed-duration chunks by _rechunk.
-#
-#   h5 simulation (TOAST output):
-#     Same content as g3 simulation, but HDF5 datasets support direct index
-#     slicing so chunks are read straight off disk (_iter_h5_simulation_chunks),
-#     no frame buffering needed.
-#
-#   g3 blasttng (real BLAST-TNG data):
-#     Calibration frame: per-KID target sweeps (+ optional cal-lamp exposure).
-#     Scan frames: raw I/Q, converted to df against each KID's sweep.
-#     Also streamed, so also goes through _rechunk.
-#
-# All arrays are time-first: (n_samps, n_dets).
 # ============================================================================ #
+"""
+Reads .g3 and .h5 files and yields fixed-duration Chunk objects for the
+pipeline. Three source formats, three ingestion paths:
+
+  g3 simulation (TOAST output):
+    Calibration frame (first): focal-plane detector names + offset quats.
+    Scan frames (many):        compressed signal + boresight quaternions.
+    G3 is a streamed format with no random access, so frames have variable
+    sample counts and get rebuffered into fixed-duration chunks by _rechunk.
+
+  h5 simulation (TOAST output):
+    Same content as g3 simulation, but HDF5 datasets support direct index
+    slicing so chunks are read straight off disk (_iter_h5_simulation_chunks),
+    no frame buffering needed.
+
+  g3 blasttng (real BLAST-TNG data):
+    Calibration frame: per-KID target sweeps (+ optional cal-lamp exposure).
+    Scan frames: raw I/Q, converted to df against each KID's sweep.
+    Also streamed, so also goes through _rechunk.
+
+All arrays are time-first: (n_samps, n_dets).
+"""
+
 
 import io
 import glob
@@ -41,6 +44,9 @@ from .pointing import precompute_det_directions, boresight_to_radec, det_radec_f
 from .signal import iq_to_df, iq_to_df_hybrid, normalize_tod
 
 
+# ============================================================================ #
+# Chunk
+# ============================================================================ #
 @dataclass
 class Chunk:
     """
@@ -79,6 +85,9 @@ class Chunk:
 # simulation path doesn't use it -- HDF5 datasets are randomly indexable, so
 # chunks are sliced directly from disk instead of buffered in memory.
 
+# ============================================================================ #
+# _rechunk
+# ============================================================================ #
 def _rechunk(frame_iter: Iterator[Chunk], chunk_duration_s: float) -> Iterator[Chunk]:
     """
     Rebuffer variable-length frame-level Chunks into fixed-duration Chunks.
@@ -162,7 +171,9 @@ def _rechunk(frame_iter: Iterator[Chunk], chunk_duration_s: float) -> Iterator[C
 
 # ── G3 simulation format helpers ─────────────────────────────────────────────
 
-# Adapted from Bonnie Slocombe, https://github.com/bonnieslocombe/g3_mapmaking, mapmaker/g3mapmaker.py, QuickMapMaker.Process
+# ============================================================================ #
+# _load_g3_focalplane
+# ============================================================================ #
 def _load_g3_focalplane(frame):
     """
     Extract detector names and precomputed pointing directions from a
@@ -189,7 +200,9 @@ def _load_g3_focalplane(frame):
     return det_names, det_quats, det_dirs
 
 
-# Adapted from Bonnie Slocombe, https://github.com/bonnieslocombe/g3_mapmaking, mapmaker/g3mapmaker.py, QuickMapMaker.Process
+# ============================================================================ #
+# _g3_simulation_scan_to_chunk
+# ============================================================================ #
 def _g3_simulation_scan_to_chunk(frame, det_names, det_dirs, sample_rate_ref, apply_offsets: bool = True):
     """
     Convert one g3 simulation scan frame into a frame-level Chunk.
@@ -245,6 +258,9 @@ def _g3_simulation_scan_to_chunk(frame, det_names, det_dirs, sample_rate_ref, ap
     )
 
 
+# ============================================================================ #
+# _iter_g3_simulation_chunks
+# ============================================================================ #
 def _iter_g3_simulation_chunks(files: list, apply_offsets: bool = True) -> Iterator[Chunk]:
     """Yield one frame-level Chunk per scan frame from CCAT g3 simulation files."""
     det_names       = None
@@ -267,6 +283,9 @@ def _iter_g3_simulation_chunks(files: list, apply_offsets: bool = True) -> Itera
 
 # ── HDF5 simulation format helpers ───────────────────────────────────────────
 
+# ============================================================================ #
+# _load_h5_focalplane
+# ============================================================================ #
 def _load_h5_focalplane(path):
     """
     Extract detector names and precomputed pointing directions from an HDF5
@@ -289,6 +308,9 @@ def _load_h5_focalplane(path):
     return det_names, det_quats, det_dirs
 
 
+# ============================================================================ #
+# _iter_h5_simulation_chunks
+# ============================================================================ #
 def _iter_h5_simulation_chunks(files: list, chunk_duration_s: float, apply_offsets: bool = True) -> Iterator[Chunk]:
     """
     Yield fixed-duration Chunks directly from HDF5 simulation files.
@@ -361,7 +383,9 @@ def _iter_h5_simulation_chunks(files: list, chunk_duration_s: float, apply_offse
 
 # ── Real BLAST-TNG format helpers ────────────────────────────────────────────
 
-
+# ============================================================================ #
+# _interp_to_length
+# ============================================================================ #
 def _interp_to_length(a: np.ndarray, n_new: int) -> np.ndarray:
     """
     Index-based linear interpolation, stretching/compressing `a` to `n_new`
@@ -380,6 +404,9 @@ def _interp_to_length(a: np.ndarray, n_new: int) -> np.ndarray:
     return np.interp(x_new, x_old, a)
 
 
+# ============================================================================ #
+# _load_blasttng_calibration
+# ============================================================================ #
 def _load_blasttng_calibration(frame, target_sweeps_key: str = "target_sweeps"):
     """
     Extract detector names and calibration sweep data from a calibration frame.
@@ -420,6 +447,9 @@ def _load_blasttng_calibration(frame, target_sweeps_key: str = "target_sweeps"):
     return kids, target_sweeps, baked_shifts
 
 
+# ============================================================================ #
+# get_blasttng_baked_shifts
+# ============================================================================ #
 def get_blasttng_baked_shifts(cfg: dict) -> Optional[dict]:
     """
     Peek at the first blasttng .g3 file's calibration frame for pre-baked
@@ -442,6 +472,9 @@ def get_blasttng_baked_shifts(cfg: dict) -> Optional[dict]:
     return None
 
 
+# ============================================================================ #
+# get_blasttng_site
+# ============================================================================ #
 def get_blasttng_site(cfg: dict):
     """
     Peek at the first blasttng .g3 file's first scan frame for the gondola's
@@ -472,6 +505,9 @@ def get_blasttng_site(cfg: dict):
     return None
 
 
+# ============================================================================ #
+# _load_blasttng_cal_lamp_df
+# ============================================================================ #
 def _load_blasttng_cal_lamp_df(frame, kids, target_sweeps, iq_key: str = "cal_lamp_data",
                                df_method: str = "hybrid", threshold_frac: float = 0.05):
     """
@@ -503,6 +539,9 @@ def _load_blasttng_cal_lamp_df(frame, kids, target_sweeps, iq_key: str = "cal_la
     return cal_lamp_df
 
 
+# ============================================================================ #
+# _blasttng_scan_to_chunk
+# ============================================================================ #
 def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
                             iq_key: str = "data", df_method: str = "hybrid",
                             threshold_frac: float = 0.05, cal_lamp_df: dict = None):
@@ -576,6 +615,9 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
     )
 
 
+# ============================================================================ #
+# _iter_blasttng_chunks
+# ============================================================================ #
 def _iter_blasttng_chunks(files: list, iq_key: str = "data", target_sweeps_key: str = "target_sweeps",
                           cal_lamp_key: str = "cal_lamp_data",
                           df_method: str = "hybrid", threshold_frac: float = 0.05) -> Iterator[Chunk]:
@@ -608,6 +650,9 @@ def _iter_blasttng_chunks(files: list, iq_key: str = "data", target_sweeps_key: 
 
 # ── Public interface ───────────────────────────────────────────────────────────
 
+# ============================================================================ #
+# iter_chunks
+# ============================================================================ #
 def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
     """
     Yield fixed-duration Chunks from the files specified in cfg.

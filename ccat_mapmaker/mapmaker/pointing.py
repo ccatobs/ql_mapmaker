@@ -1,6 +1,7 @@
 # ============================================================================ #
 # pointing.py
 #
+# James Burgoyne, jburgoyne@phas.ubc.ca
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
 # CCAT August 2026
@@ -20,6 +21,9 @@ from scipy.spatial.transform import Rotation
 _Z_AXIS = np.array([0.0, 0.0, 1.0])
 
 
+# ============================================================================ #
+# _pointing_to_radec
+# ============================================================================ #
 def _pointing_to_radec(pointing: np.ndarray) -> tuple:
     """Convert (n_samps, 3) unit vectors to (ra, dec) in degrees."""
     ra  = np.degrees(np.arctan2(pointing[:, 1], pointing[:, 0])) % 360.0
@@ -27,6 +31,9 @@ def _pointing_to_radec(pointing: np.ndarray) -> tuple:
     return ra, dec
 
 
+# ============================================================================ #
+# precompute_det_directions
+# ============================================================================ #
 def precompute_det_directions(det_quats: np.ndarray) -> np.ndarray:
     """
     Rotate the z-axis by each detector's offset quaternion -> (n_dets, 3).
@@ -39,6 +46,9 @@ def precompute_det_directions(det_quats: np.ndarray) -> np.ndarray:
     return Rotation.from_quat(det_quats).apply(_Z_AXIS)
 
 
+# ============================================================================ #
+# boresight_to_radec
+# ============================================================================ #
 def boresight_to_radec(boresight_q: np.ndarray) -> tuple:
     """
     Boresight quaternion timestream -> (ra, dec, boresight_r).
@@ -54,6 +64,9 @@ def boresight_to_radec(boresight_q: np.ndarray) -> tuple:
     return ra, dec, boresight_r
 
 
+# ============================================================================ #
+# det_radec_from_boresight
+# ============================================================================ #
 def det_radec_from_boresight(boresight_r, det_dir: np.ndarray) -> tuple:
     """
     Per-sample RA/Dec for one detector. Hot path — called once per detector

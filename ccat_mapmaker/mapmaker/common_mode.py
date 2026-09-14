@@ -1,6 +1,7 @@
 # ============================================================================ #
 # common_mode.py
 #
+# James Burgoyne, jburgoyne@phas.ubc.ca
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
 # CCAT August 2026
@@ -11,19 +12,30 @@
 import numpy as np
 
 
-# Adapted from Jonah Lee, https://github.com/jonahjlee/blasttng-to-g3, g3_utils/signal.py, remove_common_mode
+# ============================================================================ #
+# estimate_common_mode
+# ============================================================================ #
 def estimate_common_mode(tod: np.ndarray, flag_mask: np.ndarray) -> np.ndarray:
     """Mean across detectors at each time sample : naive atmosphere estimate."""
+    # TODO: The detectors are pointing at different parts of the sky
+    # so this only removes signal common at one time.
+    # Elevation component of atmosphere not perfectly removed with this.
+    # Can we remove it some other way?
     return np.nanmean(tod * flag_mask, axis=1)
 
 
+# ============================================================================ #
+# subtract_common_mode
+# ============================================================================ #
 def subtract_common_mode(tod: np.ndarray,
                          common_mode: np.ndarray) -> np.ndarray:
     """Subtract the common-mode estimate from every detector's timestream."""
     return tod - common_mode[:, np.newaxis]
 
 
-# Adapted from Jonah Lee, https://github.com/jonahjlee/blasttng-to-g3, g3_utils/signal.py, azelToMapPix + common_mode_iter
+# ============================================================================ #
+# lookup_map_signal
+# ============================================================================ #
 def lookup_map_signal(combined_map: np.ndarray,
                       ra: np.ndarray, dec: np.ndarray,
                       ra_edges: np.ndarray, dec_edges: np.ndarray) -> np.ndarray:
@@ -46,7 +58,9 @@ def lookup_map_signal(combined_map: np.ndarray,
     return np.where(np.isfinite(vals), vals, 0.0)
 
 
-# Adapted from Jonah Lee, external/blasttng-to-g3/g3_utils/signal.py, common_mode_iter
+# ============================================================================ #
+# iterate_common_mode
+# ============================================================================ #
 def iterate_common_mode(tod: np.ndarray, flag_mask: np.ndarray,
                         ra: np.ndarray, dec: np.ndarray,
                         combined_map: np.ndarray,

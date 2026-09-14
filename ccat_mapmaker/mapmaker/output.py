@@ -1,6 +1,7 @@
 # ============================================================================ #
 # output.py
 #
+# James Burgoyne, jburgoyne@phas.ubc.ca
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
 # CCAT August 2026
@@ -24,11 +25,10 @@ CMAP_NULL   = "RdBu_r"
 DPI         = 200
 
 
-def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarray,
-                           ra_edges: np.ndarray, dec_edges: np.ndarray,
-                           out_dir: pathlib.Path, pd_cfg: dict,
-                           psd_avg: np.ndarray = None, psd_freqs: np.ndarray = None,
-                           psd_all_kids: list = None):
+# ============================================================================ #
+# save_per_detector_maps
+# ============================================================================ #
+def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarray, ra_edges: np.ndarray, dec_edges: np.ndarray, out_dir: pathlib.Path, pd_cfg: dict, psd_avg: np.ndarray = None, psd_freqs: np.ndarray = None, psd_all_kids: list = None):
     """
     Save per-detector signal maps and centroids for pointing model reconstruction.
 
@@ -107,7 +107,8 @@ def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarra
             plt.savefig(out_dir / f"{safe_name}_psd.png", dpi=DPI, bbox_inches="tight")
             plt.close(fig)
 
-        if (j + 1) % 50 == 0 or (j + 1) == n_dets:
+        # TODO: 50 is hardcoded here...
+        if (j+1)%50==0 or (j+1)==n_dets:
             print(f"    {j + 1}/{n_dets} detectors saved")
 
     with open(out_dir / "centroids.json", "w") as f:
@@ -139,6 +140,9 @@ def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarra
     return flagged
 
 
+# ============================================================================ #
+# save_iteration_maps
+# ============================================================================ #
 def save_iteration_maps(naive: np.ndarray,
                         cm_maps: list[tuple[str, np.ndarray]],
                         hits: np.ndarray,
@@ -242,6 +246,9 @@ def save_iteration_maps(naive: np.ndarray,
         print("    Saved overview.png")
 
 
+# ============================================================================ #
+# compute_convergence_metrics
+# ============================================================================ #
 def compute_convergence_metrics(naive: np.ndarray,
                                 cm_maps: list[tuple[str, np.ndarray]],
                                 hits: np.ndarray) -> dict:
@@ -283,6 +290,9 @@ def compute_convergence_metrics(naive: np.ndarray,
     return dict(labels=labels, peak=peaks, off_src_rms=rms_vals_off, on_src_rms=rms_vals_on, map_diff_rms=diff_rms)
 
 
+# ============================================================================ #
+# plot_tod_rms
+# ============================================================================ #
 def plot_tod_rms(tod_rms_data: list, filepath: pathlib.Path):
     """
     Plot median detector RMS per chunk vs elapsed time through the observation.
@@ -313,6 +323,10 @@ def plot_tod_rms(tod_rms_data: list, filepath: pathlib.Path):
     plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
 
+
+# ============================================================================ #
+# plot_psd
+# ============================================================================ #
 def plot_psd(raw_tod: np.ndarray, cleaned_tod: np.ndarray,
              sample_rate: float, filepath: pathlib.Path,
              n_det_sample: int = 10):
@@ -359,6 +373,9 @@ def plot_psd(raw_tod: np.ndarray, cleaned_tod: np.ndarray,
     plt.close(fig)
 
 
+# ============================================================================ #
+# plot_diagnostics
+# ============================================================================ #
 def plot_diagnostics(metrics: dict, pass_times: list[tuple[str, float]],
                      filepath: pathlib.Path):
     """
@@ -393,23 +410,28 @@ def plot_diagnostics(metrics: dict, pass_times: list[tuple[str, float]],
     _line(axes[1, 1], metrics["on_src_rms"],  "On-Source RMS",      "RMS",          "#e67e22")
 
     # Runtime bar chart
-    # ax = axes[1, 1]
-    # pt_labels = [p[0] for p in pass_times]
-    # pt_vals   = [p[1] for p in pass_times]
-    # bars = ax.bar(pt_labels, pt_vals, color="#8e44ad", alpha=0.85)
-    # for bar, val in zip(bars, pt_vals):
-    #     ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
-    #             f"{val:.1f}s", ha="center", va="bottom", fontsize=FONT_TICK)
-    # ax.set_title("Runtime per Pass", fontsize=FONT_TITLE, fontweight="bold")
-   # ax.set_ylabel("Time (s)", fontsize=FONT_LABEL)
-    # ax.tick_params(axis="x", rotation=20, labelsize=FONT_TICK)
-   # ax.tick_params(axis="y", labelsize=FONT_TICK)
-   # ax.grid(axis="y", alpha=0.3)
+    '''
+    ax = axes[1, 1]
+    pt_labels = [p[0] for p in pass_times]
+    pt_vals   = [p[1] for p in pass_times]
+    bars = ax.bar(pt_labels, pt_vals, color="#8e44ad", alpha=0.85)
+    for bar, val in zip(bars, pt_vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
+                f"{val:.1f}s", ha="center", va="bottom", fontsize=FONT_TICK)
+    ax.set_title("Runtime per Pass", fontsize=FONT_TITLE, fontweight="bold")
+    ax.set_ylabel("Time (s)", fontsize=FONT_LABEL)
+    ax.tick_params(axis="x", rotation=20, labelsize=FONT_TICK)
+    ax.tick_params(axis="y", labelsize=FONT_TICK)
+    ax.grid(axis="y", alpha=0.3)
+    '''
 
     plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
 
 
+# ============================================================================ #
+# plot_wnf_diagnostic
+# ============================================================================ #
 def plot_wnf_diagnostic(white_noise_floor: np.ndarray, cutoff: float, sigma: float,
                         filepath: pathlib.Path):
     """
@@ -457,6 +479,9 @@ def plot_wnf_diagnostic(white_noise_floor: np.ndarray, cutoff: float, sigma: flo
     plt.close(fig)
 
 
+# ============================================================================ #
+# plot_boresight_comparison
+# ============================================================================ #
 def plot_boresight_comparison(with_offsets: np.ndarray, boresight_only: np.ndarray,
                               ra_edges: np.ndarray, dec_edges: np.ndarray,
                               filepath: pathlib.Path):
@@ -486,6 +511,9 @@ def plot_boresight_comparison(with_offsets: np.ndarray, boresight_only: np.ndarr
     plt.close(fig)
 
 
+# ============================================================================ #
+# save_metadata
+# ============================================================================ #
 def save_metadata(metadata: dict, output_dir: pathlib.Path):
     """Write run metadata to metadata.json."""
     output_dir = pathlib.Path(output_dir)
@@ -495,6 +523,9 @@ def save_metadata(metadata: dict, output_dir: pathlib.Path):
     print("    Saved metadata.json")
 
 
+# ============================================================================ #
+# _pretty_title
+# ============================================================================ #
 def _pretty_title(label: str) -> str:
     if label == "naive":
         return "Naive Map"
@@ -506,6 +537,9 @@ def _pretty_title(label: str) -> str:
     return label.replace("_", " ").title()
 
 
+# ============================================================================ #
+# _percentile_scale
+# ============================================================================ #
 def _percentile_scale(m: np.ndarray):
     vals = m[np.isfinite(m)]
     vmin = np.percentile(vals, 1)
@@ -515,6 +549,9 @@ def _percentile_scale(m: np.ndarray):
     return vmin, vmax
 
 
+# ============================================================================ #
+# _global_scale
+# ============================================================================ #
 def _global_scale(maps: list[tuple[str, np.ndarray]]):
     all_vals = np.concatenate([m[np.isfinite(m)].ravel() for _, m in maps])
     half = max(abs(np.percentile(all_vals, 1)), abs(np.percentile(all_vals, 99.5)))
@@ -523,6 +560,9 @@ def _global_scale(maps: list[tuple[str, np.ndarray]]):
     return -half, half
 
 
+# ============================================================================ #
+# _draw_panel
+# ============================================================================ #
 def _draw_panel(ax, m, title, ra_edges, dec_edges, cmap, vmin, vmax, cbar_label):
     extent = [ra_edges[0], ra_edges[-1], dec_edges[0], dec_edges[-1]]
     cmap_obj = plt.get_cmap(cmap).copy()
@@ -558,6 +598,9 @@ def _draw_panel(ax, m, title, ra_edges, dec_edges, cmap, vmin, vmax, cbar_label)
     return im
 
 
+# ============================================================================ #
+# _plot_overview_grid
+# ============================================================================ #
 def _plot_overview_grid(naive: np.ndarray,
                         cm_maps: list[tuple[str, np.ndarray]],
                         hits: np.ndarray, noise: np.ndarray,
@@ -593,6 +636,9 @@ def _plot_overview_grid(naive: np.ndarray,
     plt.close(fig)
 
 
+# ============================================================================ #
+# _plot_map
+# ============================================================================ #
 def _plot_map(m: np.ndarray,
               ra_edges: np.ndarray, dec_edges: np.ndarray,
               filepath: pathlib.Path,

@@ -1,6 +1,7 @@
 # ============================================================================ #
 # binning.py
 #
+# James Burgoyne, jburgoyne@phas.ubc.ca
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
 # CCAT August 2026
@@ -16,8 +17,9 @@
 import numpy as np
 
 
-# Map grid pattern adapted from Bonnie Slocombe, https://github.com/bonnieslocombe/g3_mapmaking, g3mapmaker.py, QuickMapMaker.__init__
-# and Jonah Lee, https://github.com/jonahjlee/blasttng-to-g3, maps.py, MapBinner.__init__
+# ============================================================================ #
+# make_map_edges
+# ============================================================================ #
 def make_map_edges(ra0_deg: float, dec0_deg: float,
                    xlen_deg: float, ylen_deg: float,
                    res_deg: float):
@@ -38,10 +40,10 @@ def make_map_edges(ra0_deg: float, dec0_deg: float,
     return ra_edges, dec_edges
 
 
-# Adapted from Bonnie Slocombe, https://github.com/bonnieslocombe/g3_mapmaking, g3mapmaker.py, QuickMapMaker.Process
-# and Jonah Lee, https://github.com/jonahjlee/blasttng-to-g3, maps.py, MapBinner.__call__
-
+# ============================================================================ #
+# bin_detector
 # This is only really used for the per detector maps right now
+# ============================================================================ #
 def bin_detector(tod_1d: np.ndarray, flag_mask_1d: np.ndarray,
                  ra_1d: np.ndarray, dec_1d: np.ndarray,
                  ra_edges: np.ndarray, dec_edges: np.ndarray,
@@ -63,6 +65,9 @@ def bin_detector(tod_1d: np.ndarray, flag_mask_1d: np.ndarray,
     return data.astype(dtype), hits.astype(dtype)
 
 
+# ============================================================================ #
+# bin_chunk
+# ============================================================================ #
 def bin_chunk(signal: np.ndarray, flag_mask: np.ndarray,
               ra: np.ndarray, dec: np.ndarray,
               ra_edges: np.ndarray, dec_edges: np.ndarray,

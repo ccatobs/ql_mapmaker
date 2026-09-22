@@ -116,7 +116,7 @@ def find_i_ftone(Ff, f_tone):
 # ============================================================================ #
 # iq_to_df_gradient
 # ============================================================================ #
-def iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone):
+def iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone=None, i_ft=None):
     """Convert I/Q timestreams to fractional frequency shift dF/F0 
     using a fast linear (tangent-line) approximation at the resonance point.
 
@@ -126,15 +126,21 @@ def iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone):
     Qf (np.array of floats): Tuning (target) sweep Q components.
     Ff (np.array of floats): Tuning (target) sweep frequency steps.
     f_tone (float):          Probe tone frequency.
+    i_ft (int):              Probe tone index.
     """
 
     # Find the resonance index.
     # Maybe don't care about this!
     # i_f0 = find_i_dvmax(If, Qf)
 
-    # Find the probe tone index.
+    # Find the probe tone and/or index.
     # This sets baseline operating point that df is relative to.
-    i_ft = find_i_ftone(Ff, f_tone)
+    if i_ft is None:
+        if f_tone is None:
+            _, _, f_tone, i_ft = find_ftone_median(I, Q, If, Qf, Ff)
+        else:
+            i_ft = find_i_ftone(Ff, f_tone)
+    # STORE: This could be a stored intermediary product.
 
     # Frequency sweep step at probe tone.
     dF = Ff[i_ft + 1] - Ff[i_ft]
@@ -165,7 +171,7 @@ def iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone):
 # ============================================================================ #
 # iq_to_df_angle
 # ============================================================================ #
-def iq_to_df_angle(I, Q, If, Qf, Ff, f_tone):
+def iq_to_df_angle(I, Q, If, Qf, Ff, f_tone=None, i_ft=None):
     """Convert I/Q timestreams to fractional frequency shift dF/F0 
     using a slow IQ angle method.
 
@@ -175,15 +181,16 @@ def iq_to_df_angle(I, Q, If, Qf, Ff, f_tone):
     Qf (np.array of floats): Tuning (target) sweep Q components.
     Ff (np.array of floats): Tuning (target) sweep frequency steps.
     f_tone (float):          Probe tone frequency.
+    i_ft (int):              Probe tone index.
     """
 
-    # Find the resonance index.
-    # Maybe don't care about this!
-    # i_f0 = find_i_dvmax(If, Qf)
-
-    # Find the probe tone index.
+    # Find the probe tone and/or index.
     # This sets baseline operating point that df is relative to.
-    i_ft = find_i_ftone(Ff, f_tone)
+    if i_ft is None:
+        if f_tone is None:
+            _, _, f_tone, i_ft = find_ftone_median(I, Q, If, Qf, Ff)
+        else:
+            i_ft = find_i_ftone(Ff, f_tone)
     # STORE: This could be a stored intermediary product.
 
     # Estimate the resonance circle center (cI, cQ) 
@@ -223,7 +230,7 @@ def iq_to_df_angle(I, Q, If, Qf, Ff, f_tone):
 # ============================================================================ #
 # iq_to_df_hybrid
 # ============================================================================ #
-def iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone, dF_tol=4):
+def iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone=None, dF_tol=4):
     """
     Convert I/Q timestreams to fractional frequency shift dF/F0, using a fast
     linear approximation near resonance and falling back to the slower,
@@ -239,9 +246,12 @@ def iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone, dF_tol=4):
                              to switch from grad to angle method.
     """
 
-    # Find the probe tone index.
+    # Find the probe tone and/or index.
     # This sets baseline operating point that df is relative to.
-    i_ft = find_i_ftone(Ff, f_tone)
+    if f_tone is None:
+        _, _, f_tone, i_ft = find_ftone_median(I, Q, If, Qf, Ff)
+    else:
+        i_ft = find_i_ftone(Ff, f_tone)
     
     # First-pass: evaluate all samples using the fast gradient method.
     # This is computationally cheap (vectorized dot product) and accurate for 

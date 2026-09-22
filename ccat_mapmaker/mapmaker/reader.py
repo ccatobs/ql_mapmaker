@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from spt3g import core
 
 from .pointing import precompute_det_directions, boresight_to_radec, det_radec_from_boresight
-from .signal import iq_to_df_angle, iq_to_df_hybrid, normalize_tod
+from .signal import iq_to_df_angle, iq_to_df_gradient, iq_to_df_hybrid, normalize_tod
 
 
 # ============================================================================ #
@@ -508,8 +508,10 @@ def get_blasttng_site(cfg: dict):
 # ============================================================================ #
 # _load_blasttng_cal_lamp_df
 # ============================================================================ #
-def _load_blasttng_cal_lamp_df(frame, kids, target_sweeps, iq_key: str = "cal_lamp_data",
-                               df_method: str = "hybrid", threshold_frac: float = 0.05):
+def _load_blasttng_cal_lamp_df(
+        frame, kids, target_sweeps, iq_key:str="cal_lamp_data",
+        df_method: str = "hybrid", threshold_frac: float = 0.05,
+        probe_medians=None):
     """
     Compute each detector's df timestream during the calibration-lamp
     exposure, for use as the reference in signal.normalize_tod.
@@ -529,12 +531,14 @@ def _load_blasttng_cal_lamp_df(frame, kids, target_sweeps, iq_key: str = "cal_la
         I = np.asarray(super_ts.data[i_matches[0]], dtype=float)
         Q = np.asarray(super_ts.data[q_matches[0]], dtype=float)
         If, Qf, Ff = target_sweeps[kid]
+        f_tone = probe_medians[i] if probe_medians is not None else None
 
-        # TODO: remove this selection and always use hybrid
         if df_method == "hybrid":
-            df,_ = iq_to_df_hybrid(I, Q, If, Qf, Ff) # TODO: cfg dF_tol
+            df, _ = iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone)
+        elif df_method == "gradient":
+            df = iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone)
         else:
-            df = iq_to_df_angle(I, Q, If, Qf, Ff)
+            df = iq_to_df_angle(I, Q, If, Qf, Ff, f_tone)
         cal_lamp_df[kid] = np.nan_to_num(df, nan=0.0)
 
     return cal_lamp_df
@@ -545,7 +549,7 @@ def _load_blasttng_cal_lamp_df(frame, kids, target_sweeps, iq_key: str = "cal_la
 # ============================================================================ #
 def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
                             iq_key: str = "data", df_method: str = "hybrid",
-                            threshold_frac: float = 0.05, cal_lamp_df: dict = None):
+                            threshold_frac: float = 0.05, cal_lamp_df: dict = None, probe_medians=None):
     """
     Convert one real-data scan frame into a frame-level Chunk.
 
@@ -568,12 +572,14 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
         I = np.asarray(super_ts.data[i_idx], dtype=float)
         Q = np.asarray(super_ts.data[q_idx], dtype=float)
         If, Qf, Ff = target_sweeps[kid]
+        f_tone = probe_medians[i] if probe_medians is not None else None
 
-        # TODO: remove this selection and always use hybrid
         if df_method == "hybrid":
-            df,_ = iq_to_df_hybrid(I, Q, If, Qf, Ff)  # TODO: cfg dF_tol
+            df, _ = iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone)
+        elif df_method == "gradient":
+            df = iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone)
         else:
-            df = iq_to_df_angle(I, Q, If, Qf, Ff)
+            df = iq_to_df_angle(I, Q, If, Qf, Ff, f_tone)
         sig[:, i] = df
 
     # Real BLAST-TNG readout has brief dropouts where every channel's raw I/Q
@@ -619,9 +625,9 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
 # ============================================================================ #
 # _iter_blasttng_chunks
 # ============================================================================ #
-def _iter_blasttng_chunks(files: list, iq_key: str = "data", target_sweeps_key: str = "target_sweeps",
-                          cal_lamp_key: str = "cal_lamp_data",
-                          df_method: str = "hybrid", threshold_frac: float = 0.05) -> Iterator[Chunk]:
+def _iter_blasttng_chunks(
+        files:list, iq_key:str="data", target_sweeps_key:str="target_sweeps",
+        cal_lamp_key:str="cal_lamp_data", df_method:str="hybrid", threshold_frac:float = 0.05, probe_medians=None) -> Iterator[Chunk]:
     """Yield one frame-level Chunk per scan frame from real BLAST-TNG-format .g3 files."""
     kids = None
     target_sweeps = None
@@ -634,7 +640,7 @@ def _iter_blasttng_chunks(files: list, iq_key: str = "data", target_sweeps_key: 
                 kids, target_sweeps, _baked_shifts = _load_blasttng_calibration(frame, target_sweeps_key)
                 cal_lamp_df = _load_blasttng_cal_lamp_df(
                     frame, kids, target_sweeps, iq_key=cal_lamp_key,
-                    df_method=df_method, threshold_frac=threshold_frac,
+                    df_method=df_method, threshold_frac=threshold_frac, probe_medians=probe_medians
                 )
             elif frame.type == core.G3FrameType.Scan:
                 if kids is None:
@@ -645,7 +651,7 @@ def _iter_blasttng_chunks(files: list, iq_key: str = "data", target_sweeps_key: 
                 yield _blasttng_scan_to_chunk(
                     frame, kids, target_sweeps, sample_rate_ref,
                     iq_key=iq_key, df_method=df_method, threshold_frac=threshold_frac,
-                    cal_lamp_df=cal_lamp_df,
+                    cal_lamp_df=cal_lamp_df, probe_medians=probe_medians
                 )
 
 
@@ -682,13 +688,22 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
         chunked_iter = _rechunk(frame_iter, chunk_duration_s)
     elif fmt == "blasttng":
         blasttng_cfg = cfg.get("blasttng", {})
+
+        # Load cached probe tone medians if they exist in output_dir
+        out_dir = cfg.get("output", {}).get("output_dir", None)
+        probe_medians = None
+        if out_dir:
+            probe_file = pathlib.Path(out_dir) / "blasttng_probe_medians.npy"
+            if probe_file.exists():
+                probe_medians = np.load(probe_file)
+
         frame_iter = _iter_blasttng_chunks(
             files,
             iq_key=blasttng_cfg.get("iq_key", "data"),
             target_sweeps_key=blasttng_cfg.get("target_sweeps_key", "target_sweeps"),
             cal_lamp_key=blasttng_cfg.get("cal_lamp_key", "cal_lamp_data"),
             df_method=blasttng_cfg.get("df_method", "hybrid"),
-            threshold_frac=blasttng_cfg.get("threshold_frac", 0.05),
+            threshold_frac=blasttng_cfg.get("threshold_frac", 0.05), probe_medians=probe_medians
         )
         chunked_iter = _rechunk(frame_iter, chunk_duration_s)
     else:

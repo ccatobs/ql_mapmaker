@@ -91,6 +91,7 @@ def find_i_dvmax(If, Qf):
 def find_ftone_median(I, Q, If, Qf, Ff):
     """Find the probe tone by taking median of observation data.
     This is not perfect, but not terrible in absence of actual probe tone info.
+    Note: This will not work well with time chunking.
     """
 
     Ipt = np.median(I)

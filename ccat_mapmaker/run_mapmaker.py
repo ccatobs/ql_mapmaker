@@ -43,6 +43,9 @@ from mapmaker               import output
 from mapmaker               import target
 
 
+# ============================================================================ #
+# resolve_paths
+# ============================================================================ #
 def resolve_paths(cfg: dict, config_path: pathlib.Path) -> dict:
     cfg_dir = config_path.parent.resolve()
 
@@ -57,6 +60,52 @@ def resolve_paths(cfg: dict, config_path: pathlib.Path) -> dict:
     return cfg
 
 
+# ============================================================================ #
+# compute_detector_probe_medians
+# ============================================================================ #
+def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> np.ndarray:
+    """
+    Computes the full-observation median for each detector by iterating
+    detector-by-detector across all time chunks for BLAST-TNG datasets.
+    Saves the array to <out_dir>/blasttng_probe_medians.npy for use during 
+    the I/Q to df conversion step.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    save_path = os.path.join(out_dir, "blasttng_probe_medians.npy")
+
+    if os.path.exists(save_path):
+        print(f"  Found cached probe medians: {save_path}")
+        return np.load(save_path)
+
+    # 1. Inspect first chunk to get total detector count
+    first_chunk = next(iter_chunks(cfg))
+    n_dets = first_chunk.signal.shape[1]
+    
+    det_medians = np.zeros(n_dets, dtype=float)
+
+    # 2. Iterate detector-by-detector across all time chunks
+    print(f"  Computing probe tone medians across all chunks for {n_dets} detectors...")
+    for i in range(n_dets):
+        det_tod_list = []
+        for chunk in iter_chunks(cfg):
+            flags = chunk.flags[:, i] if chunk.flags.ndim > 1 else chunk.flags
+            sig_i = chunk.signal[:, i].copy()
+            sig_i[flags != 0] = np.nan
+            det_tod_list.append(sig_i)
+
+        full_det_tod = np.concatenate(det_tod_list)
+        det_medians[i] = np.nanmedian(full_det_tod)
+
+        del det_tod_list, full_det_tod
+
+    np.save(save_path, det_medians)
+    print(f"  Saved probe medians to: {save_path}")
+    return det_medians
+
+
+# ============================================================================ #
+# _first_pass
+# ============================================================================ #
 def _first_pass(cfg: dict):
     """
     Single streaming pass to compute per-detector baselines, noise, mean boresight,
@@ -492,6 +541,20 @@ def main():
     print(f"Format : {cfg['data']['format']}")
     print(f"Output : {cfg['output']['output_dir']}")
     print()
+
+# ------------------------------------------------------------------ #
+    # STEP 0: Compute global detector probe tone medians (BLAST-TNG only)
+    # ------------------------------------------------------------------ #
+    if cfg["data"]["format"] == "blasttng":
+        print("Step 0: Calculating BLAST-TNG probe tone medians...")
+        t = time.perf_counter()
+        
+        # Build base target output directory from config
+        base_out_dir = pathlib.Path(cfg["output"]["output_dir"])
+        probe_medians = _compute_blasttng_probe_medians(cfg, str(base_out_dir))
+        
+        print(f"  Probe medians range: {probe_medians.min():.4f} to {probe_medians.max():.4f} [{time.perf_counter()-t:.1f}s]")
+        
 
     # ------------------------------------------------------------------ #
     # STEP 1: First pass -- baselines and map grid

@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from spt3g import core
 
 from .pointing import precompute_det_directions, boresight_to_radec, det_radec_from_boresight
-from .signal import iq_to_df, iq_to_df_hybrid, normalize_tod
+from .signal import iq_to_df_angle, iq_to_df_hybrid, normalize_tod
 
 
 # ============================================================================ #
@@ -530,10 +530,11 @@ def _load_blasttng_cal_lamp_df(frame, kids, target_sweeps, iq_key: str = "cal_la
         Q = np.asarray(super_ts.data[q_matches[0]], dtype=float)
         If, Qf, Ff = target_sweeps[kid]
 
+        # TODO: remove this selection and always use hybrid
         if df_method == "hybrid":
-            df, _ = iq_to_df_hybrid(I, Q, If, Qf, Ff, threshold_frac=threshold_frac)
+            df,_ = iq_to_df_hybrid(I, Q, If, Qf, Ff) # TODO: cfg dF_tol
         else:
-            df = iq_to_df(I, Q, If, Qf, Ff)
+            df = iq_to_df_angle(I, Q, If, Qf, Ff)
         cal_lamp_df[kid] = np.nan_to_num(df, nan=0.0)
 
     return cal_lamp_df
@@ -568,16 +569,16 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
         Q = np.asarray(super_ts.data[q_idx], dtype=float)
         If, Qf, Ff = target_sweeps[kid]
 
+        # TODO: remove this selection and always use hybrid
         if df_method == "hybrid":
-            df, _used_fallback = iq_to_df_hybrid(I, Q, If, Qf, Ff, threshold_frac=threshold_frac)
+            df,_ = iq_to_df_hybrid(I, Q, If, Qf, Ff)  # TODO: cfg dF_tol
         else:
-            df = iq_to_df(I, Q, If, Qf, Ff)
+            df = iq_to_df_angle(I, Q, If, Qf, Ff)
         sig[:, i] = df
 
     # Real BLAST-TNG readout has brief dropouts where every channel's raw I/Q
     # goes NaN simultaneously (confirmed on roach1_pass3.g3: ~5% of samples,
-    # present in every single frame ) iq_to_df_hybrid correctly propagates that NaN
-    # through, so it needs handling here before signal reaches anything else.
+    # present in every single frame ) iq_to_df_hybrid correctly propagates that NaN through, so it needs handling here before signal reaches anything else.
 
     sig = np.nan_to_num(sig, nan=0.0)
 

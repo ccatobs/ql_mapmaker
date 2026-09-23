@@ -509,9 +509,7 @@ def get_blasttng_site(cfg: dict):
 # _load_blasttng_cal_lamp_df
 # ============================================================================ #
 def _load_blasttng_cal_lamp_df(
-        frame, kids, target_sweeps, iq_key:str="cal_lamp_data",
-        df_method: str = "hybrid", threshold_frac: float = 0.05,
-        probe_medians=None):
+        frame, kids, target_sweeps, iq_key: str = "cal_lamp_data",df_method: str = "hybrid", threshold_frac: float = 0.05, probe_medians: Optional[dict] = None):
     """
     Compute each detector's df timestream during the calibration-lamp
     exposure, for use as the reference in signal.normalize_tod.
@@ -523,15 +521,16 @@ def _load_blasttng_cal_lamp_df(
     names    = np.asarray(super_ts.names)
 
     cal_lamp_df = {}
-    for i, kid in enumerate(kids):
+    for kid in kids:
         i_matches = np.where(names == f"{kid}_I")[0]
         q_matches = np.where(names == f"{kid}_Q")[0]
         if len(i_matches) == 0 or len(q_matches) == 0:
-            continue  # this kid isn't in the cal-lamp exposure; skip it
+            continue
         I = np.asarray(super_ts.data[i_matches[0]], dtype=float)
         Q = np.asarray(super_ts.data[q_matches[0]], dtype=float)
         If, Qf, Ff = target_sweeps[kid]
-        f_tone = probe_medians[i] if probe_medians is not None else None
+        
+        f_tone = probe_medians.get(kid) if probe_medians is not None else None
 
         if df_method == "hybrid":
             df, _ = iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone)
@@ -549,15 +548,10 @@ def _load_blasttng_cal_lamp_df(
 # ============================================================================ #
 def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
                             iq_key: str = "data", df_method: str = "hybrid",
-                            threshold_frac: float = 0.05, cal_lamp_df: dict = None, probe_medians=None):
+                            threshold_frac: float = 0.05, cal_lamp_df: dict = None,
+                            probe_medians: Optional[dict] = None):
     """
     Convert one real-data scan frame into a frame-level Chunk.
-
-    Raw I/Q is stored as a G3SuperTimestream with names "<kid>_I", "<kid>_Q"
-    (same convention as the calibration sweep). Each detector's I/Q is
-    converted to fractional frequency shift (df) against its own
-    calibration sweep.
-
     """
     super_ts = frame[iq_key]
     names    = np.asarray(super_ts.names)
@@ -572,7 +566,8 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
         I = np.asarray(super_ts.data[i_idx], dtype=float)
         Q = np.asarray(super_ts.data[q_idx], dtype=float)
         If, Qf, Ff = target_sweeps[kid]
-        f_tone = probe_medians[i] if probe_medians is not None else None
+
+        f_tone = probe_medians.get(kid) if probe_medians is not None else None
 
         if df_method == "hybrid":
             df, _ = iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone)
@@ -582,17 +577,8 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
             df = iq_to_df_angle(I, Q, If, Qf, Ff, f_tone)
         sig[:, i] = df
 
-    # Real BLAST-TNG readout has brief dropouts where every channel's raw I/Q
-    # goes NaN simultaneously (confirmed on roach1_pass3.g3: ~5% of samples,
-    # present in every single frame ) iq_to_df_hybrid correctly propagates that NaN through, so it needs handling here before signal reaches anything else.
-
     sig = np.nan_to_num(sig, nan=0.0)
 
-    # Normalize each detector against its own cal-lamp exposure (median-zero,
-    # cal-lamp-peak-scaled), matches g3_utils.signal.NormalizeDF
-    # (Without this, every
-    # detector's raw sensitivity differs (depends on that resonator's own
-    # coupling/quality factor)
     if cal_lamp_df is not None:
         for i, kid in enumerate(kids):
             if kid in cal_lamp_df:
@@ -609,16 +595,16 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
     if sample_rate_ref[0] is None:
         sample_rate_ref[0] = n_samps / (t_stop - t_start)
 
-    flags = np.zeros((n_samps, n_dets), dtype=int)  # TODO: real flagging once available
+    flags = np.zeros((n_samps, n_dets), dtype=int)
 
     return Chunk(
         kids=kids, signal=sig, common_mode=None,
-        ra=None, dec=None,  # per-detector offsets not yet available for real data
+        ra=None, dec=None,
         ra_bore=ra_bore, dec_bore=dec_bore,
         boresight_q=None, det_dirs=None,
         t_start=t_start, t_stop=t_stop,
         sample_rate=sample_rate_ref[0], flags=flags,
-        chunk_index=-1,  # assigned by _rechunk
+        chunk_index=-1,
     )
 
 
@@ -688,14 +674,14 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
         chunked_iter = _rechunk(frame_iter, chunk_duration_s)
     elif fmt == "blasttng":
         blasttng_cfg = cfg.get("blasttng", {})
-
-        # Load cached probe tone medians if they exist in output_dir
+        
         out_dir = cfg.get("output", {}).get("output_dir", None)
         probe_medians = None
         if out_dir:
-            probe_file = pathlib.Path(out_dir) / "blasttng_probe_medians.npy"
+            probe_file = pathlib.Path(out_dir) / "blasttng_probe_medians.npz"
             if probe_file.exists():
-                probe_medians = np.load(probe_file)
+                with np.load(probe_file) as data:
+                    probe_medians = dict(zip(data["kids"], data["medians"]))
 
         frame_iter = _iter_blasttng_chunks(
             files,
@@ -703,7 +689,8 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
             target_sweeps_key=blasttng_cfg.get("target_sweeps_key", "target_sweeps"),
             cal_lamp_key=blasttng_cfg.get("cal_lamp_key", "cal_lamp_data"),
             df_method=blasttng_cfg.get("df_method", "hybrid"),
-            threshold_frac=blasttng_cfg.get("threshold_frac", 0.05), probe_medians=probe_medians
+            threshold_frac=blasttng_cfg.get("threshold_frac", 0.05),
+            probe_medians=probe_medians,
         )
         chunked_iter = _rechunk(frame_iter, chunk_duration_s)
     else:

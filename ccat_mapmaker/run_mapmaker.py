@@ -63,23 +63,26 @@ def resolve_paths(cfg: dict, config_path: pathlib.Path) -> dict:
 # ============================================================================ #
 # compute_detector_probe_medians
 # ============================================================================ #
-def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> np.ndarray:
+def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
     """
-    Computes the full-observation median for each detector by iterating
-    detector-by-detector across all time chunks for BLAST-TNG datasets.
-    Saves the array to <out_dir>/blasttng_probe_medians.npy for use during 
-    the I/Q to df conversion step.
+    Computes the full-observation median for each detector across all time chunks 
+    for BLAST-TNG datasets. Saves a dictionary mapping {kid_name: median_value} 
+    to <out_dir>/blasttng_probe_medians.npz.
     """
     os.makedirs(out_dir, exist_ok=True)
-    save_path = os.path.join(out_dir, "blasttng_probe_medians.npy")
+    save_path = os.path.join(out_dir, "blasttng_probe_medians.npz")
 
     if os.path.exists(save_path):
         print(f"  Found cached probe medians: {save_path}")
-        return np.load(save_path)
+        with np.load(save_path) as data:
+            kids = data["kids"]
+            medians = data["medians"]
+            return dict(zip(kids, medians))
 
-    # 1. Inspect first chunk to get total detector count
+    # 1. Inspect first chunk to get detector names
     first_chunk = next(iter_chunks(cfg))
-    n_dets = first_chunk.signal.shape[1]
+    kids = first_chunk.kids
+    n_dets = len(kids)
     
     det_medians = np.zeros(n_dets, dtype=float)
 
@@ -98,9 +101,9 @@ def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> np.ndarray:
 
         del det_tod_list, full_det_tod
 
-    np.save(save_path, det_medians)
+    np.savez(save_path, kids=np.array(kids), medians=det_medians)
     print(f"  Saved probe medians to: {save_path}")
-    return det_medians
+    return dict(zip(kids, det_medians))
 
 
 # ============================================================================ #
@@ -554,7 +557,7 @@ def main():
         probe_medians = _compute_blasttng_probe_medians(cfg, str(base_out_dir))
         
         print(f"  Probe medians range: {probe_medians.min():.4f} to {probe_medians.max():.4f} [{time.perf_counter()-t:.1f}s]")
-        
+
 
     # ------------------------------------------------------------------ #
     # STEP 1: First pass -- baselines and map grid

@@ -111,8 +111,7 @@ def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
 # ============================================================================ #
 def _first_pass(cfg: dict):
     """
-    Single streaming pass to compute per-detector baselines, noise, mean boresight,
-    and white-noise-floor PSD.
+    Single streaming pass to compute per-detector baselines, noise, mean boresight, and white-noise-floor PSD.
 
     Uses the median of each chunk's signal (averaged across chunks) for the
     baseline. Computes per-detector noise as the true global std of first-differences by accumulating sum and sum-of-squares
@@ -556,7 +555,7 @@ def main():
         base_out_dir = pathlib.Path(cfg["output"]["output_dir"])
         probe_medians = _compute_blasttng_probe_medians(cfg, str(base_out_dir))
         
-        print(f"  Probe medians range: {probe_medians.min():.4f} to {probe_medians.max():.4f} [{time.perf_counter()-t:.1f}s]")
+        print(f"  Probe tones found. [{time.perf_counter()-t:.1f}s]")
 
 
     # ------------------------------------------------------------------ #

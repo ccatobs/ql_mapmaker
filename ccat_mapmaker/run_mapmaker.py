@@ -3,18 +3,17 @@
 # run_mapmaker.py
 #
 # CCAT Quick-Look Mapmaker -- main entry point.
-#
-# Usage:
-#   python run_mapmaker.py                          # uses config.toml
-#   python run_mapmaker.py --config my_config.toml
-#   python run_mapmaker.py --profile                # print timing bottlenecks
+
+# use config.toml: python run_mapmaker.py
+# use other config: python run_mapmaker.py --config my_config.toml
+# print timing bottlenecks: python run_mapmaker.py --profile
 #
 # Pipeline:
-#   1. First pass    -- compute per-detector baselines and map centre
-#   2. Naive map     -- bin cleaned signal with no common-mode subtraction
-#   3. Initial CM    -- subtract naive mean across detectors, rebin
-#   4. Iterate       -- subtract sky-informed common mode, rebin (n_iterations times)
-#   5. Save          -- write maps and metadata to disk
+# 1. First pass -- compute per-detector baselines and map centre
+# 2. Naive map -- bin cleaned signal with no common-mode subtraction
+# 3. Initial CM -- subtract naive mean across detectors, rebin
+# 4. Iterate -- subtract sky-informed common mode, rebin (n_iterations times)
+# 5. Save -- write maps and metadata to disk
 # ============================================================================ #
 
 import sys
@@ -262,7 +261,9 @@ def _first_pass(cfg: dict):
     return (ra_sum/n_bore, dec_sum/n_bore, det_median_sum/n_chunks, det_noise, kids, obs_info, white_noise_floor, psd_avg, psd_freqs)
 
 
-
+# ============================================================================ #
+# _streaming_pass
+# ============================================================================ #
 def _streaming_pass(cfg: dict, pipe_cfg: dict,
                     ra_edges: np.ndarray, dec_edges: np.ndarray,
                     det_offsets: np.ndarray,
@@ -470,6 +471,9 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
             n_dets, sample_rate, sample, tod_rms_data)
 
 
+# ============================================================================ #
+# _resolve_det_selection
+# ============================================================================ #
 def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarray]:
     """
     Resolve which detectors to map from per_detector config.
@@ -511,6 +515,9 @@ def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarr
     return kids_sel, sel_idx
 
 
+# ============================================================================ #
+# _per_detector_pass
+# ============================================================================ #
 def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
                        ra_edges: np.ndarray, dec_edges: np.ndarray,
                        det_offsets: np.ndarray):
@@ -574,6 +581,9 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
     return kids_sel, det_data, det_hits
 
 
+# ============================================================================ #
+# main
+# ============================================================================ #
 def main():
     parser = argparse.ArgumentParser(description="CCAT Quick-Look Mapmaker")
     parser.add_argument("--config",  default="config.toml",
@@ -603,8 +613,8 @@ def main():
     print(f"Output : {cfg['output']['output_dir']}")
     print()
 
-# ------------------------------------------------------------------ #
-    # STEP 0: Compute global detector probe tone medians (BLAST-TNG only)
+    # ------------------------------------------------------------------ #
+    #   STEP 0: Compute global detector probe tone medians (BLAST-TNG only)
     # ------------------------------------------------------------------ #
     if cfg["data"]["format"] == "blasttng":
         print("Step 0: Calculating BLAST-TNG probe tone medians...")
@@ -618,7 +628,7 @@ def main():
 
 
     # ------------------------------------------------------------------ #
-    # STEP 1: First pass -- baselines and map grid
+    #   STEP 1: First pass -- baselines and map grid
     # ------------------------------------------------------------------ #
     map_cfg  = cfg["map"]
     pipe_cfg = cfg["pipeline"]
@@ -766,7 +776,7 @@ def main():
     raw_det_weights_kept = det_weights[raw_keep_idx]
 
     # ------------------------------------------------------------------ #
-    # STEP 1b: Per-detector shift correction (real data only) 
+    #   STEP 1b: Per-detector shift correction (real data only) 
     # Real per-detector focal-plane offsets aren't known yet (see reader.py),
     # so every detector currently gets binned at the same shared boresight
     # position,  this collapses the whole array onto one line instead of
@@ -839,7 +849,7 @@ def main():
         print(f"  Computed shifts for {len(kid_shifts)}/{len(kids_sel)} detectors (S/N >= {min_snr})")
 
     # ------------------------------------------------------------------ #
-    # STEP 1c: Raw map : manual+auto exclusion only, no white-noise-floor
+    #   STEP 1c: Raw map : manual+auto exclusion only, no white-noise-floor
     # filtering and no common-mode subtraction. Comparison reference against
     # quiet_map/combined_map below, which additionally excludes WNF outliers
     # and gets the full common-mode treatment.
@@ -856,7 +866,7 @@ def main():
     print(f"  [{time.perf_counter() - t:.1f}s]")
 
     # ------------------------------------------------------------------ #
-    # STEP 2: Naive map + initial common-mode pass
+    #   STEP 2: Naive map + initial common-mode pass
     # ------------------------------------------------------------------ #
     chunk_s     = pipe_cfg.get("chunk_duration_s", 1.0)
     t = time.perf_counter()
@@ -889,7 +899,7 @@ def main():
     pass_times = [("naive", t_naive), ("it_0", t_it0)]
 
     # ------------------------------------------------------------------ #
-    # STEP 3: Iterative common-mode passes
+    #   STEP 3: Iterative common-mode passes
     # ------------------------------------------------------------------ #
     n_iters = pipe_cfg["n_iterations"]
     if n_iters > 0:
@@ -912,7 +922,7 @@ def main():
         print("Step 3: Skipping (n_iterations = 0).")
 
     # ------------------------------------------------------------------ #
-    # STEP 4: Save outputs
+    #   STEP 4: Save outputs
     # ------------------------------------------------------------------ #
     output.save_iteration_maps(naive, cm_maps, hits, noise_map, null_map,
                                ra_edges, dec_edges, out_dir, cfg["output"],
@@ -990,7 +1000,7 @@ def main():
     output.save_metadata(metadata, out_dir)
 
     # ------------------------------------------------------------------ #
-    # STEP 5: Boresight comparison map (optional)
+    #   STEP 5: Boresight comparison map (optional)
     # ------------------------------------------------------------------ #
     if cfg["map"].get("compare_boresight", False):
         print("\nStep 5: Boresight-only comparison pass...")
@@ -1007,7 +1017,7 @@ def main():
         print("  Saved boresight_comparison.png")
 
     # ------------------------------------------------------------------ #
-    # STEP 6: Per-detector maps (optional)
+    #   STEP 6: Per-detector maps (optional)
     # ------------------------------------------------------------------ #
     if pd_cfg.get("enabled", False):
         print(f"\nStep 5: Per-detector maps...")

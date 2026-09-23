@@ -523,7 +523,7 @@ def _load_blasttng_cal_lamp_df(
     names    = np.asarray(super_ts.names)
 
     cal_lamp_df = {}
-    for kid in kids:
+    for i, kid in enumerate(kids):
         i_matches = np.where(names == f"{kid}_I")[0]
         q_matches = np.where(names == f"{kid}_Q")[0]
         if len(i_matches) == 0 or len(q_matches) == 0:

@@ -20,18 +20,21 @@
 import sys
 import pathlib
 import argparse
-import tomllib
 import time
-import json
 import cProfile
 import pstats
 import io
 from datetime import datetime, timedelta, timezone
 import os
 
+try:
+    import tomllib # 3.11 onwards
+except:
+    import tomli as tomllib
+
 import numpy as np
 from scipy.ndimage import gaussian_filter
-from scipy.signal import periodogram
+from scipy.signal import welch
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
@@ -111,73 +114,104 @@ def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
 # ============================================================================ #
 def _first_pass(cfg: dict):
     """
-    Single streaming pass to compute per-detector baselines, noise, mean boresight, and white-noise-floor PSD.
-
-    Uses the median of each chunk's signal (averaged across chunks) for the
-    baseline. Computes per-detector noise as the true global std of first-differences by accumulating sum and sum-of-squares
-    across all chunks before computing the final statistic.
-
-    PSD is accumulated as an average of per-chunk periodograms, equivalent to
-    Welch's method using each chunk as one segment, so the full timestream never
-    needs to be held in memory (contrast with computing this in a notebook via
-    scipy.signal.welch on the concatenated array). Only full-length chunks are
-    included, since a truncated final chunk has a different frequency axis and
-    can't be averaged with the others; with hundreds of chunks per observation,
-    dropping one is negligible.
-    white_noise_floor is the median PSD in a high-frequency band (0.4-0.9x
-    Nyquist), same convention as blasttng_flagging_characterization.ipynb.
+    Single streaming pass across time-ordered data (TOD) chunks to establish 
+    initial observation-wide metrics before mapmaking:
+    1. Boresight pointing center (RA/Dec centroid).
+    2. Per-detector DC baselines (mean of chunk medians).
+    3. Per-detector white noise levels (first-difference variance).
+    4. Observation-wide Power Spectral Density (PSD) via Welch's method.
+    5. High-frequency white noise floor (0.4-0.9x Nyquist median PSD).
     """
-    ra_sum = dec_sum = n_bore = 0
-    det_median_sum = det_diff_sum = det_diff_sum_sq = None
-    det_diff_count = 0
+    
+    # ACCUMULATOR INITIALIZATION
+    
+    ra_sum = dec_sum = n_bore = 0 # Boresight pointing accumulators
+    det_median_sum   = None       # Baseline tracker: sum of per-chunk medians
+    det_diff_sum     = None       # Running sum of first differences
+    det_diff_sum_sq  = None       # Running sum of squared differences
+    det_diff_count   = None       # Valid, unflagged difference count per det.
+    
     n_chunks = 0
     t_obs_start = t_obs_stop = None
     n_dets = sample_rate = kids = None
 
-    psd_sum = None
-    psd_count = 0
+    psd_sum = None # Accumulated PSD across full-length chunks
+    psd_count = 0  # Count of valid full-length chunks for PSD averaging
     psd_freqs = None
     nominal_chunk_len = None
+
+
+    # DATA STREAMING LOOP
 
     for chunk in iter_chunks(cfg):
         flags = chunk.flags
         chunk_id = chunk.chunk_index
+        
+        # Skip chunks that are completely flagged (100% bad data)
         if np.all(flags != 0):
             print(f"No good data in chunk with index {chunk_id}. Skipping to next chunk")
             continue
+
+        # Convert bitwise/boolean flags into a NaN multiplier mask:
+        # valid samples = 1.0, flagged samples = np.nan
         flag_mask = np.ones(np.shape(flags))
         flag_mask[flags != 0] = np.nan
+
+        # Capture baseline observation parameters from the first valid chunk
         if t_obs_start is None:
             t_obs_start = chunk.t_start
             n_dets      = chunk.signal.shape[1]
             sample_rate = chunk.sample_rate
             kids        = chunk.kids
-            nominal_chunk_len = chunk.signal.shape[0]
+            nominal_chunk_len = chunk.signal.shape[0]  # Reference length for PSD consistency
 
         t_obs_stop = chunk.t_stop
 
+        # Accumulate boresight pointing coordinates to find the mean observation center
         ra_sum  += chunk.ra_bore.sum()
         dec_sum += chunk.dec_bore.sum()
         n_bore  += len(chunk.ra_bore)
 
+        # Lazy allocation of per-detector tracking arrays once detector count (n_dets) is known
         if det_median_sum is None:
             det_median_sum   = np.zeros(n_dets)
             det_diff_sum     = np.zeros(n_dets)
             det_diff_sum_sq  = np.zeros(n_dets)
-        det_median_sum  += np.nanmedian(chunk.signal, axis=0)
-        diffs            = chunk.signal[1:]*flag_mask[1:] - chunk.signal[:-1]*flag_mask[:-1]
+            det_diff_count   = np.zeros(n_dets, dtype=int)
+
+        # 1. DC Baseline Estimation:
+        # Compute median across time (axis=0) for each detector in this chunk.
+        # Using chunk medians avoids bias from transient spikes.
+        det_median_sum += np.nanmedian(chunk.signal, axis=0)
+
+        # 2. First-Difference High-Pass Noise Calculation:
+        # \Delta d_t = d_t - d_{t-1}
+        # Taking adjacent differences filters out low-frequency (1/f) atmospheric and thermal drift, isolating the uncorrelated high-frequency white noise.
+        # Multiplying by flag_mask ensures any diff involving a flagged sample evaluates to NaN.
+        diffs = chunk.signal[1:] * flag_mask[1:] - chunk.signal[:-1] * flag_mask[:-1]
+
+        # Count unflagged differences individually per detector to avoid underestimating variance when detectors have non-uniform flag rates.
+        valid_mask = np.isfinite(diffs)
         det_diff_sum    += np.nansum(diffs, axis=0)
         det_diff_sum_sq += np.nansum((diffs ** 2), axis=0)
-        det_diff_count  += len(diffs)
+        det_diff_count  += np.sum(valid_mask, axis=0)
         n_chunks += 1
 
+        # 3. Power Spectral Density (PSD) Accumulation:
+        # Accumulate PSDs using Welch's periodogram method.
+        # We enforce chunk.signal.shape[0] == nominal_chunk_len so that all processed chunks share identical frequency binning (f). 
+        # Truncated final chunks are skipped.
         if chunk.signal.shape[0] == nominal_chunk_len:
-            f, p = periodogram(chunk.signal, fs=sample_rate, axis=0)
+            # A Hann window is applied per chunk to suppress 1/f spectral leakage across bins.
+            f, p = welch(chunk.signal, fs=sample_rate, window="hann", axis=0)
             if psd_sum is None:
                 psd_sum   = np.zeros_like(p)
                 psd_freqs = f
             psd_sum   += p
             psd_count += 1
+
+
+    # STORE GLOBAL OBSERVATION PARAMETERS
 
     obs_info = dict(
         t_start_g3s    = t_obs_start,
@@ -187,21 +221,46 @@ def _first_pass(cfg: dict):
         sample_rate_hz = sample_rate,
         n_chunks       = n_chunks,
     )
-    det_noise = np.sqrt(np.clip(
-        det_diff_sum_sq / det_diff_count - (det_diff_sum / det_diff_count) ** 2,
-        0, None
-    ))
 
+
+    # POST LOOP METRIC CALCULATIONS
+
+    # Calculate exact global sample variance of first differences across all chunks:
+    # Var(\Delta d) = E[(\Delta d)^2] - (E[\Delta d])^2
+    var_diffs = (det_diff_sum_sq / det_diff_count) - (det_diff_sum / det_diff_count) ** 2
+
+    # Physical scaling for white noise floor:
+    # For independent, identically distributed white noise with per-sample standard deviation \sigma_w,
+    # Var(d_t - d_{t-1}) = Var(d_t) + Var(d_{t-1}) = 2 * \sigma_w^2.
+    # Therefore, \sigma_w = \sqrt{Var(\Delta d)} / \sqrt{2}.
+    det_noise = np.sqrt(np.clip(var_diffs, 0, None)) / np.sqrt(2)
+
+    # Calculate mean PSD across valid chunks
     psd_avg = psd_sum / psd_count if psd_count > 0 else None
     white_noise_floor = None
+
     if psd_avg is not None:
         nyquist    = sample_rate / 2
+        
+        # Select high-frequency band clear of low-f 1/f noise (<0.4x Nyquist) and hardware anti-aliasing filter roll-offs (>0.9x Nyquist).
         white_band = (psd_freqs > 0.4 * nyquist) & (psd_freqs < 0.9 * nyquist)
-        # psd_avg is (n_freq, n_dets) -- median over freq axis for each detector
+        
+        # Take the median PSD power in this band per detector.
+        # Used downstream for robust outlier cuts and inverse-variance map weights.
         white_noise_floor = np.median(psd_avg[white_band, :], axis=0)
 
-    return (ra_sum / n_bore, dec_sum / n_bore, det_median_sum / n_chunks, det_noise,
-            kids, obs_info, white_noise_floor, psd_avg, psd_freqs)
+    # Returns:
+    #   1. Mean RA boresight center
+    #   2. Mean Dec boresight center
+    #   3. Mean of per-chunk medians (DC baseline proxy)
+    #   4. Per-detector white noise standard deviation (\sigma_w)
+    #   5. Detector IDs (kids)
+    #   6. Observation metadata dictionary
+    #   7. Per-detector high-frequency white noise floor
+    #   8. Average PSD array
+    #   9. PSD frequency axis
+    return (ra_sum/n_bore, dec_sum/n_bore, det_median_sum/n_chunks, det_noise, kids, obs_info, white_noise_floor, psd_avg, psd_freqs)
+
 
 
 def _streaming_pass(cfg: dict, pipe_cfg: dict,

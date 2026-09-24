@@ -104,8 +104,10 @@ def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
         det_tod_list = []
         for chunk in iter_chunks(cfg):
             flags = chunk.flags[:, i] if chunk.flags.ndim > 1 else chunk.flags
-            sig_i = chunk.signal[:, i].copy()
-            sig_i[flags != 0] = np.nan
+            # sig_i = chunk.signal[:, i].copy()
+            # sig_i[flags != 0] = np.nan
+            # det_tod_list.append(sig_i)
+            sig_i = np.where(flags == 0, chunk.signal[:, i], np.nan)
             det_tod_list.append(sig_i)
 
         full_det_tod = np.concatenate(det_tod_list)
@@ -629,8 +631,9 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
         else:
             sig = chunk.signal - det_offsets[np.newaxis, :]
 
-        flag_mask = np.ones(np.shape(flags))
-        flag_mask[flags != 0] = np.nan
+        # flag_mask = np.ones(np.shape(flags))
+        # flag_mask[flags != 0] = np.nan
+        flag_mask = np.where(flags != 0, np.nan, 1.0)
 
         if boresight_only or ra is None:
             ra = np.repeat(chunk.ra_bore[:, np.newaxis], sig.shape[1], axis=1)
@@ -666,8 +669,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                 sig = subtract_common_mode(sig, estimate_common_mode(sig, flag_mask))
 
         if return_sample and psd_cm is None:
-            # psd_cm = sig.copy() * flag_mask
-            psd_cm = sig * flag_mask
+            psd_cm = sig.copy() * flag_mask
 
         if collect_tod_rms:
             rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
@@ -713,9 +715,15 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
             n_dets, sample_rate, sample, tod_rms_data)
 
 
+
+
 # ============================================================================ #
 # STEPS 1c, 2, & 3: MAPMAKING PASSES
 # ============================================================================ #
+
+
+# ============================================================================ #
+#   step_1c_raw_map
 def step_1c_raw_map(cfg: dict, step1_res: dict, kid_shifts: dict | None) -> np.ndarray:
     pipe_cfg = cfg["pipeline"]
     t = time.perf_counter()
@@ -734,6 +742,8 @@ def step_1c_raw_map(cfg: dict, step1_res: dict, kid_shifts: dict | None) -> np.n
     return raw_map
 
 
+# ============================================================================ #
+#   step_2_naive_and_initial_cm
 def step_2_naive_and_initial_cm(cfg: dict, step1_res: dict, kid_shifts: dict | None) -> dict:
     pipe_cfg = cfg["pipeline"]
     chunk_s = pipe_cfg.get("chunk_duration_s", 1.0)
@@ -781,6 +791,8 @@ def step_2_naive_and_initial_cm(cfg: dict, step1_res: dict, kid_shifts: dict | N
     }
 
 
+# ============================================================================ #
+#   step_3_iterations
 def step_3_iterations(cfg: dict, step1_res: dict, step2_res: dict, kid_shifts: dict | None) -> tuple[np.ndarray, list, list]:
     pipe_cfg = cfg["pipeline"]
     n_iters = pipe_cfg["n_iterations"]
@@ -811,9 +823,15 @@ def step_3_iterations(cfg: dict, step1_res: dict, step2_res: dict, kid_shifts: d
     return combined_map, cm_maps, pass_times
 
 
+
+
 # ============================================================================ #
 # STEP 4: OUTPUT SAVING & METADATA
 # ============================================================================ #
+
+
+# ============================================================================ #
+#   _build_metadata
 def _build_metadata(cfg: dict, step1_res: dict, cm_maps: list, pass_times: list,
                     metrics: dict, timestamp: str, elapsed: float) -> dict:
     pipe_cfg = cfg["pipeline"]
@@ -876,6 +894,8 @@ def _build_metadata(cfg: dict, step1_res: dict, cm_maps: list, pass_times: list,
     return metadata
 
 
+# ============================================================================ #
+#   step_4_save_outputs
 def step_4_save_outputs(cfg: dict, step1_res: dict, step2_res: dict, raw_map: np.ndarray,
                         cm_maps: list, pass_times: list, t_total: float) -> tuple[str, dict]:
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -924,9 +944,15 @@ def step_4_save_outputs(cfg: dict, step1_res: dict, step2_res: dict, raw_map: np
     return out_dir, metadata
 
 
+
+
 # ============================================================================ #
 # STEPS 5 & 6: OPTIONAL PASSES & PROFILING
 # ============================================================================ #
+
+
+# ============================================================================ #
+#   step_5_boresight_comparison
 def step_5_boresight_comparison(cfg: dict, step1_res: dict, combined_map: np.ndarray, out_dir: str) -> None:
     if cfg["map"].get("compare_boresight", False):
         print("\nStep 5: Boresight-only comparison pass...")
@@ -946,6 +972,8 @@ def step_5_boresight_comparison(cfg: dict, step1_res: dict, combined_map: np.nda
         print("  Saved boresight_comparison.png")
 
 
+# ============================================================================ #
+#   step_6_per_detector_maps
 def step_6_per_detector_maps(cfg: dict, step1_res: dict, pd_results: tuple | None,
                              out_dir: str, metadata: dict) -> None:
     pd_cfg = cfg.get("per_detector", {})
@@ -977,6 +1005,8 @@ def step_6_per_detector_maps(cfg: dict, step1_res: dict, pd_results: tuple | Non
         print("\nStep 6: Per-detector maps disabled (set per_detector.enabled = true to enable).")
 
 
+# ============================================================================ #
+#   finish_run
 def finish_run(args, profiler: cProfile.Profile, out_dir: str, elapsed: float) -> None:
     print()
     print(f"Total time : {elapsed:.1f}s")
@@ -997,9 +1027,15 @@ def finish_run(args, profiler: cProfile.Profile, out_dir: str, elapsed: float) -
         print(f"Visualise    : snakeviz {prof_path}")
 
 
+
+
 # ============================================================================ #
 # MAIN ENTRY POINT
 # ============================================================================ #
+
+
+# ============================================================================ #
+#   main
 def main():
     parser = argparse.ArgumentParser(description="CCAT Quick-Look Mapmaker")
     parser.add_argument("--config", default="config.toml", help="Path to config file (default: config.toml)")

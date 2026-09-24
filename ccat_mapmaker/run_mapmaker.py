@@ -45,9 +45,13 @@ from mapmaker import output
 from mapmaker import target
 
 
+
+
 # ============================================================================ #
 # PATH RESOLUTION & CONFIGURATION
 # ============================================================================ #
+
+
 def resolve_paths(cfg: dict, config_path: pathlib.Path) -> dict:
     cfg_dir = config_path.parent.resolve()
 
@@ -70,9 +74,14 @@ def load_configuration(config_path_str: str) -> tuple[dict, pathlib.Path]:
     return cfg, config_path
 
 
+
+
 # ============================================================================ #
 # STEP 0: PROBE MEDIANS
 # ============================================================================ #
+
+# ============================================================================ #
+#   _compute_blasttng_probe_medians
 def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
     os.makedirs(out_dir, exist_ok=True)
     save_path = os.path.join(out_dir, "blasttng_probe_medians.npz")
@@ -109,6 +118,8 @@ def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
     return dict(zip(kids, det_medians))
 
 
+# ============================================================================ #
+#   step_0_probe_medians
 def step_0_probe_medians(cfg: dict) -> None:
     if cfg["data"]["format"] == "blasttng":
         print("Step 0: Calculating BLAST-TNG probe tone medians...")
@@ -118,9 +129,15 @@ def step_0_probe_medians(cfg: dict) -> None:
         print(f"  Probe tones found. [{time.perf_counter()-t:.1f}s]")
 
 
+
+
 # ============================================================================ #
 # STEP 1: FIRST PASS & DETECTOR SELECTION
 # ============================================================================ #
+
+
+# ============================================================================ #
+#   _first_pass
 def _first_pass(cfg: dict):
     ra_sum = dec_sum = n_bore = 0
     det_median_sum = None
@@ -740,7 +757,8 @@ def step_3_iterations(cfg: dict, step1_res: dict, step2_res: dict, kid_shifts: d
     n_iters = pipe_cfg["n_iterations"]
     combined_map = step2_res["combined_map"]
 
-    cm_maps = [("it_0", combined_map.copy())]
+    # cm_maps = [("it_0", combined_map.copy())]
+    cm_maps = [("it_0", combined_map)]
     pass_times = [("naive", step2_res["t_naive"]), ("it_0", step2_res["t_it0"])]
 
     if n_iters > 0:
@@ -756,7 +774,8 @@ def step_3_iterations(cfg: dict, step1_res: dict, step2_res: dict, kid_shifts: d
                 compute_time_null=pipe_cfg.get("compute_time_null", True),
             )
             t_iter = time.perf_counter() - t
-            cm_maps.append((f"it_{i}", combined_map.copy()))
+            # cm_maps.append((f"it_{i}", combined_map.copy()))
+            cm_maps.append((f"it_{i}", combined_map))
             pass_times.append((f"it_{i}", t_iter))
             print(f"[{t_iter:.1f}s]")
     else:

@@ -1,12 +1,11 @@
 # ============================================================================ #
 # output.py
+# Save map outputs to disk.
 #
 # James Burgoyne, jburgoyne@phas.ubc.ca
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
 # CCAT August 2026
-#
-# Save map outputs to disk.
 # ============================================================================ #
 
 import json

@@ -13,6 +13,11 @@ import json
 import math
 import pathlib
 import numpy as np
+
+import matplotlib
+matplotlib.use('Agg')
+matplotlib.rcParams['text.parse_math'] = False
+matplotlib.rcParams['text.usetex'] = False
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 

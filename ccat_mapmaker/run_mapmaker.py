@@ -586,7 +586,6 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                     compute_time_null: bool = True,
                     compute_detsplit_null: bool = False,
                     weights: np.ndarray = None):
-    
     ny = len(dec_edges) - 1
     nx = len(ra_edges) - 1
     total_data = np.zeros((ny, nx), dtype=float)
@@ -602,14 +601,23 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
     if compute_detsplit_null:
         n_dets_kept = len(det_offsets)
         det_half = np.random.default_rng(0).integers(0, 2, size=n_dets_kept)
-        det_mask0 = (det_half == 0)
-        det_mask1 = (det_half == 1)
-        w_half0 = weights[det_mask0] if weights is not None else None
-        w_half1 = weights[det_mask1] if weights is not None else None
+        m0 = (det_half == 0)
+        m1 = ~m0
+        w0 = weights[m0] if weights is not None else None
+        w1 = weights[m1] if weights is not None else None
         detsplit_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
         detsplit_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
 
-    # Precompute static pipeline settings
+    # Precompute detector shift offsets outside chunk loop
+    shift_ra = shift_dec = None
+    if kid_shifts and kids_kept is not None:
+        shift_ra = np.array([kid_shifts.get(k, (0.0, 0.0))[0] for k in kids_kept], dtype=float)[np.newaxis, :]
+        shift_dec = np.array([kid_shifts.get(k, (0.0, 0.0))[1] for k in kids_kept], dtype=float)[np.newaxis, :]
+
+    n_dets = sample_rate = None
+    psd_raw = psd_cm = None
+    tod_rms_data: list = []
+
     clean_steps = pipe_cfg.get("clean_steps", [])
     step_params = {
         "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
@@ -617,23 +625,9 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
         "notch": pipe_cfg.get("notch", {}),
     }
 
-    # Precompute KID coordinate shifts
-    shift_ra = shift_dec = None
-    if kid_shifts and kids_kept is not None:
-        shift_ra = np.array([kid_shifts.get(k, (0.0, 0.0))[0] for k in kids_kept], dtype=float)[np.newaxis, :]
-        shift_dec = np.array([kid_shifts.get(k, (0.0, 0.0))[1] for k in kids_kept], dtype=float)[np.newaxis, :]
-
-    det_offsets_2d = det_offsets[np.newaxis, :]
-
-    n_dets = sample_rate = None
-    psd_raw = psd_cm = None
-    tod_rms_data: list = []
-
     for chunk in iter_chunks(cfg):
         flags = chunk.flags
-        if keep_idx is not None:
-            flags = flags[:, keep_idx]
-
+        chunk_id = chunk.chunk_index
         if np.all(flags != 0):
             continue
 
@@ -646,17 +640,17 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
         no_per_detector_offsets = ra is None
 
         if keep_idx is not None:
-            sig = chunk.signal[:, keep_idx] - det_offsets_2d
+            sig = chunk.signal[:, keep_idx] - det_offsets[np.newaxis, :]
+            flags = flags[:, keep_idx]
             if ra is not None:
                 ra = ra[:, keep_idx]
                 dec = dec[:, keep_idx]
         else:
-            sig = chunk.signal - det_offsets_2d
+            sig = chunk.signal - det_offsets[np.newaxis, :]
 
         flag_mask = np.where(flags != 0, np.nan, 1.0)
 
         if boresight_only or no_per_detector_offsets:
-            # Zero-copy broadcast view
             ra = np.broadcast_to(chunk.ra_bore[:, np.newaxis], sig.shape)
             dec = np.broadcast_to(chunk.dec_bore[:, np.newaxis], sig.shape)
 
@@ -665,15 +659,16 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                 dec = dec + shift_dec
 
         sig, new_flags = clean_tod(sig, flag_mask, chunk.sample_rate,
-                                   steps=clean_steps, step_params=step_params)
+                                   steps=clean_steps,
+                                   step_params=step_params)
 
-        bin_flag_mask = np.where(new_flags != 0, np.nan, flag_mask)
+        bin_flag_mask = np.where((flags != 0) | (new_flags != 0), np.nan, 1.0)
 
         if return_sample and psd_raw is None:
             psd_raw = sig.copy()
 
         if collect_tod_rms:
-            rms_raw = float(np.sqrt(np.median(np.mean(np.square(sig), axis=0))))
+            rms_raw = float(np.median(np.sqrt(np.mean(np.square(sig), axis=0))))
 
         if common_mode:
             if current_map is not None:
@@ -686,25 +681,30 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
             psd_cm = sig * flag_mask
 
         if collect_tod_rms:
-            rms_cm = float(np.sqrt(np.median(np.mean(np.square(sig), axis=0)))) if common_mode else rms_raw
+            rms_cm = float(np.median(np.sqrt(np.mean(np.square(sig), axis=0)))) if common_mode else rms_raw
             tod_rms_data.append((chunk.t_start, rms_raw, rms_cm))
 
-        d, h, sq = bin_chunk(sig, bin_flag_mask, ra, dec, ra_edges, dec_edges, weights=weights)
+        if compute_detsplit_null:
+            d0, h0, sq0 = bin_chunk(sig[:, m0], bin_flag_mask[:, m0], ra[:, m0], dec[:, m0],
+                                    ra_edges, dec_edges, weights=w0)
+            d1, h1, sq1 = bin_chunk(sig[:, m1], bin_flag_mask[:, m1], ra[:, m1], dec[:, m1],
+                                    ra_edges, dec_edges, weights=w1)
+            
+            detsplit_data[0] += d0; detsplit_hits[0] += h0
+            detsplit_data[1] += d1; detsplit_hits[1] += h1
+            
+            d, h, sq = d0 + d1, h0 + h1, sq0 + sq1
+        else:
+            d, h, sq = bin_chunk(sig, bin_flag_mask, ra, dec, ra_edges, dec_edges, weights=weights)
+
         total_data += d
         total_hits += h
         total_sumsq += sq
 
         if compute_time_null:
-            half = chunk.chunk_index % 2
+            half = chunk_id % 2
             null_data[half] += d
             null_hits[half] += h
-
-        if compute_detsplit_null:
-            for dhalf, (m, w_h) in enumerate(((det_mask0, w_half0), (det_mask1, w_half1))):
-                d_ds, h_ds, _ = bin_chunk(sig[:, m], bin_flag_mask[:, m], ra[:, m], dec[:, m],
-                                          ra_edges, dec_edges, weights=w_h)
-                detsplit_data[dhalf] += d_ds
-                detsplit_hits[dhalf] += h_ds
 
     with np.errstate(invalid='ignore', divide='ignore'):
         combined = np.where(total_hits > 0, total_data / total_hits, np.nan)

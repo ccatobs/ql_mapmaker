@@ -226,6 +226,8 @@ def _first_pass(cfg: dict):
             det_noise, kids, obs_info, white_noise_floor, psd_avg, psd_freqs)
 
 
+# ============================================================================ #
+#   _check_psd_anomalies
 def _check_psd_anomalies(psd_avg: np.ndarray, psd_freqs: np.ndarray, pipe_cfg: dict) -> list:
     psd_anomalies = []
     if psd_avg is not None:
@@ -240,6 +242,8 @@ def _check_psd_anomalies(psd_avg: np.ndarray, psd_freqs: np.ndarray, pipe_cfg: d
     return psd_anomalies
 
 
+# ============================================================================ #
+#   _filter_detectors
 def _filter_detectors(all_kids: list, det_noise: np.ndarray, white_noise_floor: np.ndarray,
                       pipe_cfg: dict) -> tuple[np.ndarray, np.ndarray, set, list, list, float]:
     n_total = len(all_kids)
@@ -291,6 +295,8 @@ def _filter_detectors(all_kids: list, det_noise: np.ndarray, white_noise_floor: 
     return raw_keep_idx, keep_idx, exclude_set, auto_excluded, wnf_excluded, wnf_cutoff
 
 
+# ============================================================================ #
+#   _compute_detector_weights
 def _compute_detector_weights(white_noise_floor: np.ndarray, n_total: int, pipe_cfg: dict) -> np.ndarray:
     weight_cap_factor = pipe_cfg.get("weight_cap_factor", 5.0)
     det_weights = np.ones(n_total)
@@ -304,6 +310,8 @@ def _compute_detector_weights(white_noise_floor: np.ndarray, n_total: int, pipe_
     return det_weights
 
 
+# ============================================================================ #
+#   _resolve_map_center
 def _resolve_map_center(cfg: dict, obs_info: dict, ra0_auto: float, dec0_auto: float) -> tuple[float, float, str]:
     map_cfg = cfg["map"]
     centre_pinned = "ra0_deg" in map_cfg and "dec0_deg" in map_cfg
@@ -327,6 +335,8 @@ def _resolve_map_center(cfg: dict, obs_info: dict, ra0_auto: float, dec0_auto: f
         return ra0_auto, dec0_auto, "auto (mean boresight)"
 
 
+# ============================================================================ #
+#   step_1_first_pass
 def step_1_first_pass(cfg: dict) -> dict:
     map_cfg = cfg["map"]
     pipe_cfg = cfg["pipeline"]
@@ -396,9 +406,15 @@ def step_1_first_pass(cfg: dict) -> dict:
     }
 
 
+
+
 # ============================================================================ #
 # PER-DETECTOR PASS & SHIFTS
 # ============================================================================ #
+
+
+# ============================================================================ #
+#   _resolve_det_selection
 def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarray]:
     n_total = len(all_kids)
     name_to_idx = {k: i for i, k in enumerate(all_kids)}
@@ -431,6 +447,8 @@ def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarr
     return kids_sel, sel_idx
 
 
+# ============================================================================ #
+#   _per_detector_pass
 def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
                        ra_edges: np.ndarray, dec_edges: np.ndarray,
                        det_offsets: np.ndarray):
@@ -475,6 +493,8 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
     return kids_sel, det_data, det_hits
 
 
+# ============================================================================ #
+#   _compute_shifts_from_pd_results
 def _compute_shifts_from_pd_results(pd_results: tuple, ra_edges: np.ndarray, dec_edges: np.ndarray,
                                      ra0_deg: float, dec0_deg: float, pd_cfg: dict) -> dict:
     kids_sel, det_data, det_hits = pd_results
@@ -505,6 +525,8 @@ def _compute_shifts_from_pd_results(pd_results: tuple, ra_edges: np.ndarray, dec
     return kid_shifts
 
 
+# ============================================================================ #
+#   step_1b_shift_correction
 def step_1b_shift_correction(cfg: dict, step1_res: dict) -> tuple[dict | None, tuple | None]:
     pipe_cfg = cfg["pipeline"]
     pd_cfg = cfg.get("per_detector", {})
@@ -539,9 +561,15 @@ def step_1b_shift_correction(cfg: dict, step1_res: dict) -> tuple[dict | None, t
     return kid_shifts, pd_results
 
 
+
+
 # ============================================================================ #
 # STREAMING PASS DRIVER
 # ============================================================================ #
+
+
+# ============================================================================ #
+#   _streaming_pass
 def _streaming_pass(cfg: dict, pipe_cfg: dict,
                     ra_edges: np.ndarray, dec_edges: np.ndarray,
                     det_offsets: np.ndarray,
@@ -638,7 +666,8 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                 sig = subtract_common_mode(sig, estimate_common_mode(sig, flag_mask))
 
         if return_sample and psd_cm is None:
-            psd_cm = sig.copy() * flag_mask
+            # psd_cm = sig.copy() * flag_mask
+            psd_cm = sig * flag_mask
 
         if collect_tod_rms:
             rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
@@ -757,8 +786,7 @@ def step_3_iterations(cfg: dict, step1_res: dict, step2_res: dict, kid_shifts: d
     n_iters = pipe_cfg["n_iterations"]
     combined_map = step2_res["combined_map"]
 
-    # cm_maps = [("it_0", combined_map.copy())]
-    cm_maps = [("it_0", combined_map)]
+    cm_maps = [("it_0", combined_map.copy())]
     pass_times = [("naive", step2_res["t_naive"]), ("it_0", step2_res["t_it0"])]
 
     if n_iters > 0:
@@ -774,8 +802,7 @@ def step_3_iterations(cfg: dict, step1_res: dict, step2_res: dict, kid_shifts: d
                 compute_time_null=pipe_cfg.get("compute_time_null", True),
             )
             t_iter = time.perf_counter() - t
-            # cm_maps.append((f"it_{i}", combined_map.copy()))
-            cm_maps.append((f"it_{i}", combined_map))
+            cm_maps.append((f"it_{i}", combined_map.copy()))
             pass_times.append((f"it_{i}", t_iter))
             print(f"[{t_iter:.1f}s]")
     else:

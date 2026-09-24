@@ -120,22 +120,6 @@ def detect_line_freq(tod: np.ndarray, sample_rate: float,
     return float(freqs[band][np.argmax(median_power)])
 
 
-
-@numba.njit(cache=True, fastmath=True)
-def move_median_1d(arr: np.ndarray, window: int) -> np.ndarray:
-    """Centered 1D moving median replacing scipy.signal.medfilt."""
-    n = len(arr)
-    out = np.empty(n, dtype=arr.dtype)
-    half = window // 2
-    
-    for i in range(n):
-        start = max(0, i - half)
-        end = min(n, i + half + 1)
-        out[i] = np.median(arr[start:end])
-        
-    return out
-
-
 # ============================================================================ #
 # highpass_filter
 # this method may not be useful for real data
@@ -190,11 +174,10 @@ def find_psd_anomalies(psd_avg: np.ndarray, psd_freqs: np.ndarray,
     # usable, important since the low-frequency end (near the 1/f knee) is
     # exactly where a real contaminant like AMKID's ~0.3 Hz line would sit.
     kernel = smooth_bins if smooth_bins % 2 == 1 else smooth_bins + 1
-    # pad     = kernel // 2
     filled  = np.where(finite_psd, log_psd, np.median(log_psd[finite_psd]))
-    # padded  = np.pad(filled, pad, mode="edge")
-    continuum = move_median_1d(filled, window=kernel)
-    # continuum = medfilt(padded, kernel_size=kernel)[pad:pad + len(filled)]
+    pad     = kernel // 2
+    padded  = np.pad(filled, pad, mode="edge")
+    continuum = medfilt(padded, kernel_size=kernel)[pad:pad + len(filled)]
     residual  = log_psd - continuum
 
     finite = finite_psd & np.isfinite(residual)

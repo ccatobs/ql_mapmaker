@@ -586,6 +586,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                     compute_time_null: bool = True,
                     compute_detsplit_null: bool = False,
                     weights: np.ndarray = None):
+    
     ny = len(dec_edges) - 1
     nx = len(ra_edges) - 1
     total_data = np.zeros((ny, nx), dtype=float)
@@ -601,8 +602,28 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
     if compute_detsplit_null:
         n_dets_kept = len(det_offsets)
         det_half = np.random.default_rng(0).integers(0, 2, size=n_dets_kept)
+        det_mask0 = (det_half == 0)
+        det_mask1 = (det_half == 1)
+        w_half0 = weights[det_mask0] if weights is not None else None
+        w_half1 = weights[det_mask1] if weights is not None else None
         detsplit_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
         detsplit_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+
+    # Precompute static pipeline settings
+    clean_steps = pipe_cfg.get("clean_steps", [])
+    step_params = {
+        "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
+        "highpass": pipe_cfg.get("highpass", {}),
+        "notch": pipe_cfg.get("notch", {}),
+    }
+
+    # Precompute KID coordinate shifts
+    shift_ra = shift_dec = None
+    if kid_shifts and kids_kept is not None:
+        shift_ra = np.array([kid_shifts.get(k, (0.0, 0.0))[0] for k in kids_kept], dtype=float)[np.newaxis, :]
+        shift_dec = np.array([kid_shifts.get(k, (0.0, 0.0))[1] for k in kids_kept], dtype=float)[np.newaxis, :]
+
+    det_offsets_2d = det_offsets[np.newaxis, :]
 
     n_dets = sample_rate = None
     psd_raw = psd_cm = None
@@ -610,49 +631,41 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
 
     for chunk in iter_chunks(cfg):
         flags = chunk.flags
-        chunk_id = chunk.chunk_index
+        if keep_idx is not None:
+            flags = flags[:, keep_idx]
+
         if np.all(flags != 0):
             continue
+
         if n_dets is None:
             n_dets = len(chunk.kids)
             sample_rate = chunk.sample_rate
 
         ra = chunk.ra
         dec = chunk.dec
-        flags = chunk.flags
         no_per_detector_offsets = ra is None
 
         if keep_idx is not None:
-            sig = chunk.signal[:, keep_idx] - det_offsets[np.newaxis, :]
-            flags = flags[:, keep_idx]
+            sig = chunk.signal[:, keep_idx] - det_offsets_2d
             if ra is not None:
                 ra = ra[:, keep_idx]
                 dec = dec[:, keep_idx]
         else:
-            sig = chunk.signal - det_offsets[np.newaxis, :]
+            sig = chunk.signal - det_offsets_2d
 
-        flag_mask = np.ones(np.shape(flags))
-        flag_mask[flags != 0] = np.nan
+        flag_mask = np.where(flags != 0, np.nan, 1.0)
 
-        if boresight_only or ra is None:
-            ra = np.repeat(chunk.ra_bore[:, np.newaxis], sig.shape[1], axis=1)
-            dec = np.repeat(chunk.dec_bore[:, np.newaxis], sig.shape[1], axis=1)
-            # ra = np.broadcast_to(chunk.ra_bore[:, np.newaxis], sig.shape) # maybe slightly faster
-            # dec = np.broadcast_to(chunk.dec_bore[:, np.newaxis], sig.shape)
+        if boresight_only or no_per_detector_offsets:
+            # Zero-copy broadcast view
+            ra = np.broadcast_to(chunk.ra_bore[:, np.newaxis], sig.shape)
+            dec = np.broadcast_to(chunk.dec_bore[:, np.newaxis], sig.shape)
 
-            if no_per_detector_offsets and not boresight_only and kid_shifts and kids_kept is not None:
-                shift_ra = np.array([kid_shifts.get(k, (0.0, 0.0))[0] for k in kids_kept])
-                shift_dec = np.array([kid_shifts.get(k, (0.0, 0.0))[1] for k in kids_kept])
-                ra = ra + shift_ra[np.newaxis, :]
-                dec = dec + shift_dec[np.newaxis, :]
+            if no_per_detector_offsets and not boresight_only and shift_ra is not None:
+                ra = ra + shift_ra
+                dec = dec + shift_dec
 
         sig, new_flags = clean_tod(sig, flag_mask, chunk.sample_rate,
-                                   steps=pipe_cfg.get("clean_steps", []),
-                                   step_params={
-                                       "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
-                                       "highpass": pipe_cfg.get("highpass", {}),
-                                       "notch": pipe_cfg.get("notch", {}),
-                                   })
+                                   steps=clean_steps, step_params=step_params)
 
         bin_flag_mask = np.where(new_flags != 0, np.nan, flag_mask)
 
@@ -660,7 +673,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
             psd_raw = sig.copy()
 
         if collect_tod_rms:
-            rms_raw = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0))))
+            rms_raw = float(np.sqrt(np.median(np.mean(np.square(sig), axis=0))))
 
         if common_mode:
             if current_map is not None:
@@ -670,10 +683,10 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                 sig = subtract_common_mode(sig, estimate_common_mode(sig, flag_mask))
 
         if return_sample and psd_cm is None:
-            psd_cm = sig.copy() * flag_mask
+            psd_cm = sig * flag_mask
 
         if collect_tod_rms:
-            rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
+            rms_cm = float(np.sqrt(np.median(np.mean(np.square(sig), axis=0)))) if common_mode else rms_raw
             tod_rms_data.append((chunk.t_start, rms_raw, rms_cm))
 
         d, h, sq = bin_chunk(sig, bin_flag_mask, ra, dec, ra_edges, dec_edges, weights=weights)
@@ -682,16 +695,14 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
         total_sumsq += sq
 
         if compute_time_null:
-            half = chunk_id % 2
+            half = chunk.chunk_index % 2
             null_data[half] += d
             null_hits[half] += h
 
         if compute_detsplit_null:
-            for dhalf in (0, 1):
-                m = det_half == dhalf
-                w_half = weights[m] if weights is not None else None
+            for dhalf, (m, w_h) in enumerate(((det_mask0, w_half0), (det_mask1, w_half1))):
                 d_ds, h_ds, _ = bin_chunk(sig[:, m], bin_flag_mask[:, m], ra[:, m], dec[:, m],
-                                          ra_edges, dec_edges, weights=w_half)
+                                          ra_edges, dec_edges, weights=w_h)
                 detsplit_data[dhalf] += d_ds
                 detsplit_hits[dhalf] += h_ds
 
@@ -714,6 +725,149 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
     sample = {"raw": psd_raw, "cm": psd_cm} if return_sample else None
     return (combined, total_hits, noise_map, null_map, detsplit_null_map,
             n_dets, sample_rate, sample, tod_rms_data)
+
+# def _streaming_pass(cfg: dict, pipe_cfg: dict,
+#                     ra_edges: np.ndarray, dec_edges: np.ndarray,
+#                     det_offsets: np.ndarray,
+#                     current_map: np.ndarray = None,
+#                     common_mode: bool = True,
+#                     return_sample: bool = False,
+#                     keep_idx: np.ndarray = None,
+#                     boresight_only: bool = False,
+#                     collect_tod_rms: bool = False,
+#                     kids_kept: list = None,
+#                     kid_shifts: dict = None,
+#                     compute_time_null: bool = True,
+#                     compute_detsplit_null: bool = False,
+#                     weights: np.ndarray = None):
+#     ny = len(dec_edges) - 1
+#     nx = len(ra_edges) - 1
+#     total_data = np.zeros((ny, nx), dtype=float)
+#     total_hits = np.zeros((ny, nx), dtype=float)
+#     total_sumsq = np.zeros((ny, nx), dtype=float)
+
+#     null_map = None
+#     if compute_time_null:
+#         null_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+#         null_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+
+#     detsplit_null_map = None
+#     if compute_detsplit_null:
+#         n_dets_kept = len(det_offsets)
+#         det_half = np.random.default_rng(0).integers(0, 2, size=n_dets_kept)
+#         detsplit_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+#         detsplit_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+
+#     n_dets = sample_rate = None
+#     psd_raw = psd_cm = None
+#     tod_rms_data: list = []
+
+#     for chunk in iter_chunks(cfg):
+#         flags = chunk.flags
+#         chunk_id = chunk.chunk_index
+#         if np.all(flags != 0):
+#             continue
+#         if n_dets is None:
+#             n_dets = len(chunk.kids)
+#             sample_rate = chunk.sample_rate
+
+#         ra = chunk.ra
+#         dec = chunk.dec
+#         flags = chunk.flags
+#         no_per_detector_offsets = ra is None
+
+#         if keep_idx is not None:
+#             sig = chunk.signal[:, keep_idx] - det_offsets[np.newaxis, :]
+#             flags = flags[:, keep_idx]
+#             if ra is not None:
+#                 ra = ra[:, keep_idx]
+#                 dec = dec[:, keep_idx]
+#         else:
+#             sig = chunk.signal - det_offsets[np.newaxis, :]
+
+#         flag_mask = np.ones(np.shape(flags))
+#         flag_mask[flags != 0] = np.nan
+
+#         if boresight_only or ra is None:
+#             ra = np.repeat(chunk.ra_bore[:, np.newaxis], sig.shape[1], axis=1)
+#             dec = np.repeat(chunk.dec_bore[:, np.newaxis], sig.shape[1], axis=1)
+#             # ra = np.broadcast_to(chunk.ra_bore[:, np.newaxis], sig.shape) # maybe slightly faster
+#             # dec = np.broadcast_to(chunk.dec_bore[:, np.newaxis], sig.shape)
+
+#             if no_per_detector_offsets and not boresight_only and kid_shifts and kids_kept is not None:
+#                 shift_ra = np.array([kid_shifts.get(k, (0.0, 0.0))[0] for k in kids_kept])
+#                 shift_dec = np.array([kid_shifts.get(k, (0.0, 0.0))[1] for k in kids_kept])
+#                 ra = ra + shift_ra[np.newaxis, :]
+#                 dec = dec + shift_dec[np.newaxis, :]
+
+#         sig, new_flags = clean_tod(sig, flag_mask, chunk.sample_rate,
+#                                    steps=pipe_cfg.get("clean_steps", []),
+#                                    step_params={
+#                                        "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
+#                                        "highpass": pipe_cfg.get("highpass", {}),
+#                                        "notch": pipe_cfg.get("notch", {}),
+#                                    })
+
+#         bin_flag_mask = np.where(new_flags != 0, np.nan, flag_mask)
+
+#         if return_sample and psd_raw is None:
+#             psd_raw = sig.copy()
+
+#         if collect_tod_rms:
+#             rms_raw = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0))))
+
+#         if common_mode:
+#             if current_map is not None:
+#                 sig = iterate_common_mode(sig, flag_mask, ra, dec,
+#                                           current_map, ra_edges, dec_edges)
+#             else:
+#                 sig = subtract_common_mode(sig, estimate_common_mode(sig, flag_mask))
+
+#         if return_sample and psd_cm is None:
+#             psd_cm = sig.copy() * flag_mask
+
+#         if collect_tod_rms:
+#             rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
+#             tod_rms_data.append((chunk.t_start, rms_raw, rms_cm))
+
+#         d, h, sq = bin_chunk(sig, bin_flag_mask, ra, dec, ra_edges, dec_edges, weights=weights)
+#         total_data += d
+#         total_hits += h
+#         total_sumsq += sq
+
+#         if compute_time_null:
+#             half = chunk_id % 2
+#             null_data[half] += d
+#             null_hits[half] += h
+
+#         if compute_detsplit_null:
+#             for dhalf in (0, 1):
+#                 m = det_half == dhalf
+#                 w_half = weights[m] if weights is not None else None
+#                 d_ds, h_ds, _ = bin_chunk(sig[:, m], bin_flag_mask[:, m], ra[:, m], dec[:, m],
+#                                           ra_edges, dec_edges, weights=w_half)
+#                 detsplit_data[dhalf] += d_ds
+#                 detsplit_hits[dhalf] += h_ds
+
+#     with np.errstate(invalid='ignore', divide='ignore'):
+#         combined = np.where(total_hits > 0, total_data / total_hits, np.nan)
+#         mean_sq = np.where(total_hits > 0, total_sumsq / total_hits, np.nan)
+#         variance = np.clip(mean_sq - combined ** 2, 0, None)
+#         noise_map = np.sqrt(variance / total_hits)
+
+#         if compute_time_null:
+#             map_a = np.where(null_hits[0] > 0, null_data[0] / null_hits[0], np.nan)
+#             map_b = np.where(null_hits[1] > 0, null_data[1] / null_hits[1], np.nan)
+#             null_map = (map_a - map_b) / 2.0
+
+#         if compute_detsplit_null:
+#             map_a_ds = np.where(detsplit_hits[0] > 0, detsplit_data[0] / detsplit_hits[0], np.nan)
+#             map_b_ds = np.where(detsplit_hits[1] > 0, detsplit_data[1] / detsplit_hits[1], np.nan)
+#             detsplit_null_map = (map_a_ds - map_b_ds) / 2.0
+
+#     sample = {"raw": psd_raw, "cm": psd_cm} if return_sample else None
+#     return (combined, total_hits, noise_map, null_map, detsplit_null_map,
+#             n_dets, sample_rate, sample, tod_rms_data)
 
 
 

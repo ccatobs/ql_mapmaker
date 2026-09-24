@@ -12,6 +12,20 @@
 import numpy as np
 
 
+def _mean_over_valid(tod: np.ndarray, flag_mask: np.ndarray) -> np.ndarray:
+    """Fast axis-1 mean that ignores invalid samples/NaNs without allocating more arrays than necessary."""
+    valid = np.isfinite(flag_mask)
+    if valid.all():
+        return tod.mean(axis=1, dtype=np.float64)
+    if not valid.any():
+        return np.zeros(tod.shape[0], dtype=float)
+
+    masked = np.where(valid, tod, 0.0)
+    counts = valid.sum(axis=1)
+    summed = masked.sum(axis=1)
+    return np.divide(summed, counts, out=np.zeros_like(summed, dtype=float), where=counts > 0)
+
+
 # ============================================================================ #
 # estimate_common_mode
 # ============================================================================ #
@@ -21,7 +35,7 @@ def estimate_common_mode(tod: np.ndarray, flag_mask: np.ndarray) -> np.ndarray:
     # so this only removes signal common at one time.
     # Elevation component of atmosphere not perfectly removed with this.
     # Can we remove it some other way?
-    return np.nanmean(tod * flag_mask, axis=1)
+    return _mean_over_valid(tod, flag_mask)
 
 
 # ============================================================================ #
@@ -75,6 +89,6 @@ def iterate_common_mode(tod: np.ndarray, flag_mask: np.ndarray,
     4. Subtract atmosphere estimate from original tod (preserves sky signal).
     """
     ast_estimate = lookup_map_signal(combined_map, ra, dec, ra_edges, dec_edges)
-    residuals    = (tod - ast_estimate) * flag_mask
-    common_mode  = np.nanmean(residuals, axis=1)
+    residuals = (tod - ast_estimate)
+    common_mode = _mean_over_valid(residuals, flag_mask)
     return tod - common_mode[:, np.newaxis]

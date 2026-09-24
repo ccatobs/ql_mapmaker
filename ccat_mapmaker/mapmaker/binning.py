@@ -75,8 +75,9 @@ def bin_chunk(signal: np.ndarray, flag_mask: np.ndarray,
     """
     Bin one Chunk's signal into a 2-D pixel map.
 
-    Flattens all detectors and time samples into a single histogram2d call.
-    Accumulates (data, hits) across chunks to build the full map.
+    Uses a direct integer binning path for regular map grids instead of
+    repeatedly calling histogram2d, which dominates the runtime in the
+    streaming pass when many chunks are processed.
 
     signal  : (n_samps, n_dets) cleaned signal
     flags_mask: (n_sampls, n_dets) mask of signal
@@ -91,22 +92,45 @@ def bin_chunk(signal: np.ndarray, flag_mask: np.ndarray,
     """
     n_dets = signal.shape[1]
     det_w = np.ones(n_dets, dtype=float) if weights is None else np.asarray(weights, dtype=float)
-    flags = np.copy(flag_mask)
-    flags[np.isnan(flags)] = 0
+    flags = np.nan_to_num(flag_mask, nan=0.0, posinf=0.0, neginf=0.0)
     w = flags * det_w[np.newaxis, :]  # (n_samps, n_dets): 0 where flagged, det_w elsewhere
 
-    sig_flat    = (signal * w).ravel()
-    sig_sq_flat = ((signal ** 2) * w).ravel()
-    ra_flat     = ra.ravel()
-    dec_flat    = dec.ravel()
-    w_flat      = w.ravel()
+    ra_flat = np.ascontiguousarray(ra).ravel()
+    dec_flat = np.ascontiguousarray(dec).ravel()
+    w_flat = (w).ravel()
+    sig_flat = (signal * w).ravel()
+    sig_sq_flat = (signal * signal * w).ravel()
+
+    ny = dec_edges.size - 1
+    nx = ra_edges.size - 1
+    ra0 = float(ra_edges[0])
+    dec0 = float(dec_edges[0])
+
+    ra_step = np.diff(ra_edges)
+    dec_step = np.diff(dec_edges)
+    if ra_step.size and dec_step.size and np.allclose(ra_step, ra_step[0]) and np.allclose(dec_step, dec_step[0]):
+        ra_bin = float(ra_step[0])
+        dec_bin = float(dec_step[0])
+        ix = np.floor((ra_flat - ra0) / ra_bin).astype(np.int64, copy=False)
+        iy = np.floor((dec_flat - dec0) / dec_bin).astype(np.int64, copy=False)
+        ix = np.clip(ix, 0, nx - 1)
+        iy = np.clip(iy, 0, ny - 1)
+        flat_idx = iy * nx + ix
+        valid = np.isfinite(ra_flat) & np.isfinite(dec_flat) & (w_flat != 0.0)
+        flat_idx = flat_idx[valid]
+        if flat_idx.size == 0:
+            return np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)
+        data = np.bincount(flat_idx, weights=sig_flat[valid], minlength=nx * ny).reshape(ny, nx)
+        hits = np.bincount(flat_idx, weights=w_flat[valid], minlength=nx * ny).reshape(ny, nx)
+        sumsq = np.bincount(flat_idx, weights=sig_sq_flat[valid], minlength=nx * ny).reshape(ny, nx)
+        return data, hits, sumsq
 
     data, _, _ = np.histogram2d(dec_flat, ra_flat,
-                                bins=[dec_edges, ra_edges],
-                                weights=sig_flat)
+                               bins=[dec_edges, ra_edges],
+                               weights=sig_flat)
     hits, _, _ = np.histogram2d(dec_flat, ra_flat,
-                                bins=[dec_edges, ra_edges],
-                                weights=w_flat)
+                               bins=[dec_edges, ra_edges],
+                               weights=w_flat)
     sumsq, _, _ = np.histogram2d(dec_flat, ra_flat,
                                  bins=[dec_edges, ra_edges],
                                  weights=sig_sq_flat)

@@ -640,21 +640,26 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
             # ra = np.broadcast_to(chunk.ra_bore[:, np.newaxis], sig.shape) # maybe slightly faster
             # dec = np.broadcast_to(chunk.dec_bore[:, np.newaxis], sig.shape)
 
-            if no_per_detector_offsets and not boresight_only and kid_shifts and kids_kept is not None:
-                shift_ra = np.array([kid_shifts.get(k, (0.0, 0.0))[0] for k in kids_kept])
-                shift_dec = np.array([kid_shifts.get(k, (0.0, 0.0))[1] for k in kids_kept])
-                ra = ra + shift_ra[np.newaxis, :]
-                dec = dec + shift_dec[np.newaxis, :]
+            if no_per_detector_offsets and not boresight_only and shift_ra is not None:
+                ra = ra + shift_ra
+                dec = dec + shift_dec
 
-        sig, new_flags = clean_tod(sig, flag_mask, chunk.sample_rate,
-                                   steps=pipe_cfg.get("clean_steps", []),
-                                   step_params={
-                                       "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
-                                       "highpass": pipe_cfg.get("highpass", {}),
-                                       "notch": pipe_cfg.get("notch", {}),
-                                   })
-
-        bin_flag_mask = np.where(new_flags != 0, np.nan, flag_mask)
+        if clean_steps:
+            sig, new_flags = clean_tod(sig, flag_mask, chunk.sample_rate,
+                                       steps=clean_steps,
+                                       step_params=step_params)
+            if new_flags is None:
+                bin_flag_mask = flag_mask
+            else:
+                new_flags = np.asarray(new_flags)
+                if np.any(new_flags != 0):
+                    bin_flag_mask = flag_mask.copy()
+                    bin_flag_mask[new_flags != 0] = np.nan
+                else:
+                    bin_flag_mask = flag_mask
+        else:
+            new_flags = None
+            bin_flag_mask = flag_mask
 
         if return_sample and psd_raw is None:
             psd_raw = sig.copy()

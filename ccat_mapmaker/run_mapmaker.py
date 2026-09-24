@@ -658,11 +658,22 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                 ra = ra + shift_ra
                 dec = dec + shift_dec
 
-        sig, new_flags = clean_tod(sig, flag_mask, chunk.sample_rate,
-                                   steps=clean_steps,
-                                   step_params=step_params)
-
-        bin_flag_mask = np.where((flags != 0) | (new_flags != 0), np.nan, 1.0)
+        if clean_steps:
+            sig, new_flags = clean_tod(sig, flag_mask, chunk.sample_rate,
+                                       steps=clean_steps,
+                                       step_params=step_params)
+            if new_flags is None:
+                bin_flag_mask = flag_mask
+            else:
+                new_flags = np.asarray(new_flags)
+                if np.any(new_flags != 0):
+                    bin_flag_mask = flag_mask.copy()
+                    bin_flag_mask[new_flags != 0] = np.nan
+                else:
+                    bin_flag_mask = flag_mask
+        else:
+            new_flags = None
+            bin_flag_mask = flag_mask
 
         if return_sample and psd_raw is None:
             psd_raw = sig.copy()

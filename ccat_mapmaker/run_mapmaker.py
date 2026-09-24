@@ -635,10 +635,10 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
         flag_mask[flags != 0] = np.nan
 
         if boresight_only or ra is None:
-            # ra = np.repeat(chunk.ra_bore[:, np.newaxis], sig.shape[1], axis=1)
-            # dec = np.repeat(chunk.dec_bore[:, np.newaxis], sig.shape[1], axis=1)
-            ra = np.broadcast_to(chunk.ra_bore[:, np.newaxis], sig.shape)
-            dec = np.broadcast_to(chunk.dec_bore[:, np.newaxis], sig.shape)
+            ra = np.repeat(chunk.ra_bore[:, np.newaxis], sig.shape[1], axis=1)
+            dec = np.repeat(chunk.dec_bore[:, np.newaxis], sig.shape[1], axis=1)
+            # ra = np.broadcast_to(chunk.ra_bore[:, np.newaxis], sig.shape) # maybe slightly faster
+            # dec = np.broadcast_to(chunk.dec_bore[:, np.newaxis], sig.shape)
 
             if no_per_detector_offsets and not boresight_only and kid_shifts and kids_kept is not None:
                 shift_ra = np.array([kid_shifts.get(k, (0.0, 0.0))[0] for k in kids_kept])

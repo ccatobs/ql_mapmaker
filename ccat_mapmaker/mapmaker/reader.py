@@ -1,7 +1,7 @@
 # ============================================================================ #
 # reader.py
 #
-# James Burgoyne, jburgoyne@phas.ubc.ca
+# James Burgoyne, jamesrburgoyne@icloud.com
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
 # CCAT August 2026
@@ -26,6 +26,9 @@ pipeline. Three source formats, three ingestion paths:
     Scan frames: raw I/Q, converted to df against each KID's sweep.
     Also streamed, so also goes through _rechunk.
 
+  h5 lab
+    Most recent h5 files in draft CCAT format.
+
 All arrays are time-first: (n_samps, n_dets).
 """
 
@@ -45,7 +48,7 @@ from .signal import iq_to_df_angle, iq_to_df_gradient, iq_to_df_hybrid, normaliz
 
 
 # ============================================================================ #
-# Chunk
+# Class: Chunk
 # ============================================================================ #
 @dataclass
 class Chunk:
@@ -87,7 +90,6 @@ class Chunk:
 
 # ============================================================================ #
 # _rechunk
-# ============================================================================ #
 def _rechunk(frame_iter: Iterator[Chunk], chunk_duration_s: float) -> Iterator[Chunk]:
     """
     Rebuffer variable-length frame-level Chunks into fixed-duration Chunks.
@@ -169,11 +171,39 @@ def _rechunk(frame_iter: Iterator[Chunk], chunk_duration_s: float) -> Iterator[C
         )
 
 
-# ── G3 simulation format helpers ─────────────────────────────────────────────
+
+
+# ============================================================================ #
+# H5 LAB
+# ============================================================================ #
+
+
+# ============================================================================ #
+# _iter_h5_lab_chunks
+def _iter_h5_lab_chunks(files:list, chunk_duration_s:float, apply_offsets:bool=True) -> Iterator[Chunk]:
+    """Yield fixed-duration Chunks directly from HDF5 lab files.
+
+    Args:
+        files (list): _description_
+        chunk_duration_s (float): _description_
+        apply_offsets (bool, optional): _description_. Defaults to True.
+
+    Yields:
+        Iterator[Chunk]: _description_
+    """
+
+    pass
+
+
+
+
+# ============================================================================ #
+# G3 SIMULATION FORMAT
+# ============================================================================ #
+
 
 # ============================================================================ #
 # _load_g3_focalplane
-# ============================================================================ #
 def _load_g3_focalplane(frame):
     """
     Extract detector names and precomputed pointing directions from a
@@ -202,7 +232,6 @@ def _load_g3_focalplane(frame):
 
 # ============================================================================ #
 # _g3_simulation_scan_to_chunk
-# ============================================================================ #
 def _g3_simulation_scan_to_chunk(frame, det_names, det_dirs, sample_rate_ref, apply_offsets: bool = True):
     """
     Convert one g3 simulation scan frame into a frame-level Chunk.
@@ -260,7 +289,6 @@ def _g3_simulation_scan_to_chunk(frame, det_names, det_dirs, sample_rate_ref, ap
 
 # ============================================================================ #
 # _iter_g3_simulation_chunks
-# ============================================================================ #
 def _iter_g3_simulation_chunks(files: list, apply_offsets: bool = True) -> Iterator[Chunk]:
     """Yield one frame-level Chunk per scan frame from CCAT g3 simulation files."""
     det_names       = None
@@ -281,11 +309,15 @@ def _iter_g3_simulation_chunks(files: list, apply_offsets: bool = True) -> Itera
                 )
 
 
-# ── HDF5 simulation format helpers ───────────────────────────────────────────
+
+
+# ============================================================================ #
+# HDF5 SIMULATION FORMAT
+# ============================================================================ #
+
 
 # ============================================================================ #
 # _load_h5_focalplane
-# ============================================================================ #
 def _load_h5_focalplane(path):
     """
     Extract detector names and precomputed pointing directions from an HDF5
@@ -310,7 +342,6 @@ def _load_h5_focalplane(path):
 
 # ============================================================================ #
 # _iter_h5_simulation_chunks
-# ============================================================================ #
 def _iter_h5_simulation_chunks(files: list, chunk_duration_s: float, apply_offsets: bool = True) -> Iterator[Chunk]:
     """
     Yield fixed-duration Chunks directly from HDF5 simulation files.
@@ -381,11 +412,15 @@ def _iter_h5_simulation_chunks(files: list, chunk_duration_s: float, apply_offse
                 chunk_index += 1
 
 
-# ── Real BLAST-TNG format helpers ────────────────────────────────────────────
+
+
+# ============================================================================ #
+# BLAST-TNG FORMAT
+# ============================================================================ #
+
 
 # ============================================================================ #
 # _interp_to_length
-# ============================================================================ #
 def _interp_to_length(a: np.ndarray, n_new: int) -> np.ndarray:
     """
     Index-based linear interpolation, stretching/compressing `a` to `n_new`
@@ -406,7 +441,6 @@ def _interp_to_length(a: np.ndarray, n_new: int) -> np.ndarray:
 
 # ============================================================================ #
 # _load_blasttng_calibration
-# ============================================================================ #
 def _load_blasttng_calibration(frame, target_sweeps_key: str = "target_sweeps"):
     """
     Extract detector names and calibration sweep data from a calibration frame.
@@ -449,7 +483,6 @@ def _load_blasttng_calibration(frame, target_sweeps_key: str = "target_sweeps"):
 
 # ============================================================================ #
 # get_blasttng_baked_shifts
-# ============================================================================ #
 def get_blasttng_baked_shifts(cfg: dict) -> Optional[dict]:
     """
     Peek at the first blasttng .g3 file's calibration frame for pre-baked
@@ -474,7 +507,6 @@ def get_blasttng_baked_shifts(cfg: dict) -> Optional[dict]:
 
 # ============================================================================ #
 # get_blasttng_site
-# ============================================================================ #
 def get_blasttng_site(cfg: dict):
     """
     Peek at the first blasttng .g3 file's first scan frame for the gondola's
@@ -507,7 +539,6 @@ def get_blasttng_site(cfg: dict):
 
 # ============================================================================ #
 # _load_blasttng_cal_lamp_df
-# ============================================================================ #
 def _load_blasttng_cal_lamp_df(
         frame, kids, target_sweeps, iq_key: str = "cal_lamp_data",df_method: str = "hybrid", threshold_frac: float = 0.05, probe_medians: Optional[dict] = None):
     """
@@ -545,7 +576,6 @@ def _load_blasttng_cal_lamp_df(
 
 # ============================================================================ #
 # _blasttng_scan_to_chunk
-# ============================================================================ #
 def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
                             iq_key: str = "data", df_method: str = "hybrid",
                             threshold_frac: float = 0.05, cal_lamp_df: dict = None,
@@ -610,7 +640,6 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
 
 # ============================================================================ #
 # _iter_blasttng_chunks
-# ============================================================================ #
 def _iter_blasttng_chunks(
         files:list, iq_key:str="data", target_sweeps_key:str="target_sweeps",
         cal_lamp_key:str="cal_lamp_data", df_method:str="hybrid", threshold_frac:float = 0.05, probe_medians=None) -> Iterator[Chunk]:
@@ -641,11 +670,15 @@ def _iter_blasttng_chunks(
                 )
 
 
-# ── Public interface ───────────────────────────────────────────────────────────
+
+
+# ============================================================================ #
+# API
+# ============================================================================ #
+
 
 # ============================================================================ #
 # iter_chunks
-# ============================================================================ #
 def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
     """
     Yield fixed-duration Chunks from the files specified in cfg.
@@ -665,7 +698,9 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
     start_offset_s   = cfg["pipeline"].get("start_offset_s", 0.0)
     max_duration_s   = cfg["pipeline"].get("max_duration_s", None)
 
-    if fmt == "simulation" and file_fmt == "h5":
+    if fmt == "lab":
+        chunked_iter = _iter_h5_lab_chunks(files, chunk_duration_s, apply_offsets)
+    elif fmt == "simulation" and file_fmt == "h5":
         # HDF5 datasets support direct index slicing, so chunks are read
         # straight off disk -- no frame buffering/_rechunk needed here.
         chunked_iter = _iter_h5_simulation_chunks(files, chunk_duration_s, apply_offsets)

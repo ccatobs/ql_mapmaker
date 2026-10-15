@@ -33,6 +33,16 @@ All arrays are time-first: (n_samps, n_dets).
 """
 
 
+# TODO: chunk_duration_s requires knowing how many seconds you want
+# it would be better to be adaptable to memory allowances.
+# For example, determine available memory (with some buffer),
+# and have a max from config file, then choose smaller of two.
+# Then determine how many seconds of chunk that is.
+# Need to consider what the allowable buffer would be from testing,
+# since we will have overhead from other things in memory too.
+
+
+
 import io
 import glob
 import pathlib
@@ -179,20 +189,110 @@ def _rechunk(frame_iter: Iterator[Chunk], chunk_duration_s: float) -> Iterator[C
 
 
 # ============================================================================ #
+# _iter_h5_lab_frames
+def _iter_h5_lab_frames(files: list, apply_offsets: bool = True) -> Iterator[Chunk]:
+    """Yield one frame-level Chunk per scan frame from HDF5 lab files."""
+
+    sample_rate_ref = [None]
+
+    for path in files:
+        with h5py.File(path, 'r') as f:
+            if "timestream" not in f:
+                continue
+            timestream_grp = f["timestream"]
+            blocks = list(timestream_grp.keys())
+            if not blocks:
+                continue
+
+            # Determine available frame keys from the first block
+            first_block = blocks[0]
+            if "frames" not in timestream_grp[first_block]:
+                continue
+            frames_grp = timestream_grp[first_block]["frames"]
+            frame_keys = sorted([k for k in frames_grp.keys() if k.isdigit()], key=int)
+
+            for fk in frame_keys:
+                sample_block = frames_grp[fk]
+                frame_type = sample_block.attrs.get("frame_type", b"")
+                if isinstance(frame_type, bytes):
+                    frame_type = frame_type.decode("utf-8")
+
+                if frame_type != "Scan":
+                    continue
+
+                block_data_list = []
+                min_samps = None
+
+                # Gather data from all detector blocks for this frame
+                for block in blocks:
+                    block_frame_path = f"timestream/{block}/frames/{fk}"
+                    if block_frame_path not in f:
+                        continue
+                    b_frame = f[block_frame_path]
+                    
+                    if "data" not in b_frame or "data" not in b_frame["data"] or "times" not in b_frame["data"]:
+                        continue
+
+                    names_ds = b_frame["data"]["names"][:]
+                    names = [n.decode("utf-8") if isinstance(n, bytes) else str(n) for n in names_ds]
+                    
+                    sig_ds = b_frame["data"]["data"][:]      # (n_channels, n_samps)
+                    times_ds = b_frame["data"]["times"][:]   # (n_samps,)
+
+                    n_samps = len(times_ds)
+                    if min_samps is None or n_samps < min_samps:
+                        min_samps = n_samps
+
+                    block_data_list.append((names, sig_ds, times_ds))
+
+                if not block_data_list or min_samps is None or min_samps == 0:
+                    continue
+
+                # Align and concatenate across blocks up to min_samps
+                kids_list = []
+                sig_parts = []
+                reference_times = None
+
+                for names, sig_ds, times_ds in block_data_list:
+                    kids_list.extend(names)
+                    sig_trimmed = sig_ds[:, :min_samps].T.astype(float)  # (n_samps, n_channels)
+                    sig_parts.append(sig_trimmed)
+                    if reference_times is None:
+                        reference_times = times_ds[:min_samps]
+
+                kids = kids_list
+                sig = np.concatenate(sig_parts, axis=1)  # (n_samps, n_total_dets)
+                n_samps = min_samps
+                n_dets = len(kids)
+
+                t_start = reference_times[0] / core.G3Units.s
+                t_stop = reference_times[-1] / core.G3Units.s
+
+                if sample_rate_ref[0] is None and t_stop > t_start:
+                    sample_rate_ref[0] = n_samps / (t_stop - t_start)
+                sample_rate = sample_rate_ref[0] if sample_rate_ref[0] is not None else 1.0
+
+                ra_bore = reference_times / core.G3Units.s
+                dec_bore = np.zeros_like(ra_bore)
+                flags = np.zeros((n_samps, n_dets), dtype=int)
+
+                yield Chunk(
+                    kids=kids, signal=sig, common_mode=None,
+                    ra=None, dec=None,
+                    ra_bore=ra_bore, dec_bore=dec_bore,
+                    boresight_q=None, det_dirs=None,
+                    t_start=t_start, t_stop=t_stop,
+                    sample_rate=sample_rate, flags=flags,
+                    chunk_index=-1,
+                )
+
+
+# ============================================================================ #
 # _iter_h5_lab_chunks
-def _iter_h5_lab_chunks(files:list, chunk_duration_s:float, apply_offsets:bool=True) -> Iterator[Chunk]:
-    """Yield fixed-duration Chunks directly from HDF5 lab files.
-
-    Args:
-        files (list): _description_
-        chunk_duration_s (float): _description_
-        apply_offsets (bool, optional): _description_. Defaults to True.
-
-    Yields:
-        Iterator[Chunk]: _description_
-    """
-
-    pass
+def _iter_h5_lab_chunks(files: list, chunk_duration_s: float, apply_offsets: bool = True) -> Iterator[Chunk]:
+    """Yield fixed-duration Chunks directly from HDF5 lab files."""
+    frame_iter = _iter_h5_lab_frames(files, apply_offsets)
+    return _rechunk(frame_iter, chunk_duration_s)
 
 
 

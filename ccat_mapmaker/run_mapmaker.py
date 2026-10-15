@@ -80,6 +80,7 @@ def load_configuration(config_path_str: str) -> tuple[dict, pathlib.Path]:
 # STEP 0: PROBE MEDIANS
 # ============================================================================ #
 
+
 # ============================================================================ #
 #   _compute_blasttng_probe_medians
 def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
@@ -607,6 +608,24 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
     n_dets = sample_rate = None
     psd_raw = psd_cm = None
     tod_rms_data: list = []
+
+    # --- Configure cleaning steps used by clean_tod ---
+    clean_steps = pipe_cfg.get("clean_steps", [])
+    step_params = {
+        "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
+        "highpass":    pipe_cfg.get("highpass", {}),
+        "notch":       pipe_cfg.get("notch", {}),
+    }
+
+    # --- Prepare per-detector shifts (if provided) ---
+    # kid_shifts is expected to be a dict mapping detector-name -> (dr, ddec)
+    # kids_kept should be the list of detector names in the same column order
+    shift_ra = shift_dec = None
+    if kid_shifts is not None and kids_kept is not None:
+        # produce 1-D arrays of per-detector RA/Dec shifts so adding them to
+        # ra/dec (shape [n_samps, n_det]) will broadcast across time samples.
+        shift_ra = np.array([kid_shifts.get(k, (0.0, 0.0))[0] for k in kids_kept])
+        shift_dec = np.array([kid_shifts.get(k, (0.0, 0.0))[1] for k in kids_kept])
 
     for chunk in iter_chunks(cfg):
         flags = chunk.flags

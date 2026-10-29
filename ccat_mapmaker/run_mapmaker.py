@@ -119,8 +119,8 @@ def _precalcChunkTotal(cfg):
     """Estimate the number of chunks without loading the detector timestreams.
     """
 
-    if cfg["data"]["format"] != "lab":
-        return {"total_chunks": None}
+    # if cfg["data"]["format"] != "lab":
+    #     return {"total_chunks": None}
 
     if cfg["data"]["format"] != "blasttng":
         return {"total_chunks": None}

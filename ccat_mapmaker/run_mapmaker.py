@@ -2,6 +2,11 @@
 # ============================================================================ #
 # run_mapmaker.py
 #
+# James Burgoyne, jamesrburgoyne@icloud.com
+# Audrey Yang, audyang@student.ubc.ca
+# Vlad Grecu, vlad.grecu07@gmail.com
+# CCAT 2026
+#
 # CCAT Quick-Look Mapmaker -- main entry point.
 
 # use config.toml: python run_mapmaker.py
@@ -16,42 +21,28 @@
 # 5. Save -- write maps and metadata to disk
 # ============================================================================ #
 
-import sys
+import os
+import io
+import time
+import pstats
 import pathlib
 import argparse
-import time
 import cProfile
-import pstats
-import io
-from datetime import datetime, timedelta, timezone
-import os
-
-try:
-    import tomllib  # 3.11 onwards
-except ImportWarning:
-    import tomli as tomllib
-
 import numpy as np
-from scipy.ndimage import gaussian_filter
 from scipy.signal import welch
+from scipy.ndimage import gaussian_filter
+import tomli as toml # tomllib after python 3.11
+from datetime import datetime, timedelta, timezone
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-
-from mapmaker.reader import iter_chunks, get_blasttng_baked_shifts, get_blasttng_site
-from mapmaker.cleaning import clean_tod, find_psd_anomalies
-from mapmaker.binning import make_map_edges, bin_chunk, bin_detector
-from mapmaker.common_mode import estimate_common_mode, subtract_common_mode, iterate_common_mode
+from mapmaker import tod
+from mapmaker import map
+from mapmaker import coord
 from mapmaker import output
-from mapmaker import target
-
-
+from mapmaker import reader
 
 
 # ============================================================================ #
-# PATH RESOLUTION & CONFIGURATION
-# ============================================================================ #
-
-
+#   resolve_paths
 def resolve_paths(cfg: dict, config_path: pathlib.Path) -> dict:
     cfg_dir = config_path.parent.resolve()
 
@@ -66,19 +57,75 @@ def resolve_paths(cfg: dict, config_path: pathlib.Path) -> dict:
     return cfg
 
 
-def load_configuration(config_path_str: str) -> tuple[dict, pathlib.Path]:
+# ============================================================================ #
+# _loadConfiguration
+def _loadConfiguration(config_path_str: str) -> tuple[dict, pathlib.Path]:
+    """Load the yaml configuration file.
+
+    config_path_str: Absolute or relative path string.
+    """
+
     config_path = pathlib.Path(config_path_str)
     with open(config_path, "rb") as f:
-        cfg = tomllib.load(f)
+        cfg = toml.load(f)
     cfg = resolve_paths(cfg, config_path)
-    return cfg, config_path
+
+    print(f"Config : {config_path}")
+    for d in cfg['data']['input_dirs']:
+        print(f" Input  : {d}")
+    print(f" Format : {cfg['data']['format']}")
+    print(f" Output : {cfg['output']['output_dir']}\n")
+
+    return cfg
+
+
+# ============================================================================ #
+# _setupArgParser
+def _setupArgParser():
+    """Setup CLI arguments.
+    """
+
+    parser = argparse.ArgumentParser(description="CCAT Quick-Look Mapmaker")
+    parser.add_argument("--config", default="config.toml", help="Path to config file (default: config.toml)")
+    parser.add_argument("--profile", action="store_true", help="Print timing bottlenecks on exit")
+    args = parser.parse_args()
+
+    profiler = cProfile.Profile()
+    if args.profile:
+        profiler.enable()
+
+    return args, profiler
+
+
+# ============================================================================ #
+# _setupProfiler
+def _setupProfiler(args):
+    """Setup code timing profiling.
+    """
+
+    profiler = cProfile.Profile()
+
+    if args.profile:
+        profiler.enable()
+        
+    return profiler
 
 
 
 
 # ============================================================================ #
-# STEP 0: PROBE MEDIANS
+# == STEPS
 # ============================================================================ #
+
+# ============================================================================ #
+# step_0_probe_medians
+def step_0_probe_medians(cfg: dict) -> None:
+    if cfg["data"]["format"] == "blasttng":
+        print("Step 0: Calculating BLAST-TNG probe tone medians...")
+        t = time.perf_counter()
+        base_out_dir = pathlib.Path(cfg["output"]["output_dir"])
+        tod._compute_blasttng_probe_medians(cfg, str(base_out_dir))
+        print(f"  Probe tones found. [{time.perf_counter()-t:.1f}s]")
 
 
 # ============================================================================ #
@@ -94,7 +141,7 @@ def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
             medians = data["medians"]
             return dict(zip(kids, medians))
 
-    first_chunk = next(iter_chunks(cfg))
+    first_chunk = next(reader.iter_chunks(cfg))
     kids = first_chunk.kids
     n_dets = len(kids)
 
@@ -103,7 +150,7 @@ def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
     print(f"  Computing probe tone medians across all chunks for {n_dets} detectors...")
     for i in range(n_dets):
         det_tod_list = []
-        for chunk in iter_chunks(cfg):
+        for chunk in reader.iter_chunks(cfg):
             flags = chunk.flags[:, i] if chunk.flags.ndim > 1 else chunk.flags
             # sig_i = chunk.signal[:, i].copy()
             # sig_i[flags != 0] = np.nan
@@ -122,81 +169,63 @@ def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
 
 
 # ============================================================================ #
-#   step_0_probe_medians
-def step_0_probe_medians(cfg: dict) -> None:
-    if cfg["data"]["format"] == "blasttng":
-        print("Step 0: Calculating BLAST-TNG probe tone medians...")
-        t = time.perf_counter()
-        base_out_dir = pathlib.Path(cfg["output"]["output_dir"])
-        _compute_blasttng_probe_medians(cfg, str(base_out_dir))
-        print(f"  Probe tones found. [{time.perf_counter()-t:.1f}s]")
+# _firstPass
+def _firstPass(cfg: dict):
+    """Streaming loop over all data chunks to compute:
+    - Boresight pointing averages (for map center fallback)
+    - Per-detector medians and noise estimates (via temporal differences)
+    - Average Power Spectral Density (PSD) and white noise floor characteristics
+    """
 
+    # Stream through chunks of time-ordered data (TOD)
+    init = False
+    for chunk in reader.iter_chunks(cfg): # chunk_id=chunk.chunk_index
 
+        # Skip chunks where all detector data is flagged out
+        if np.all(chunk.flags != 0):
+            continue 
 
+        # Initialize on first valid chunk
+        # ------------------------------------------------------ #
+        if not init:
 
-# ============================================================================ #
-# STEP 1: FIRST PASS & DETECTOR SELECTION
-# ============================================================================ #
-
-
-# ============================================================================ #
-#   _first_pass
-def _first_pass(cfg: dict):
-    ra_sum = dec_sum = n_bore = 0
-    det_median_sum = None
-    det_diff_sum = None
-    det_diff_sum_sq = None
-    det_diff_count = None
-
-    n_chunks = 0
-    t_obs_start = t_obs_stop = None
-    n_dets = sample_rate = kids = None
-
-    psd_sum = None
-    psd_count = 0
-    psd_freqs = None
-    nominal_chunk_len = None
-
-    for chunk in iter_chunks(cfg):
-        flags = chunk.flags
-        chunk_id = chunk.chunk_index
-
-        if np.all(flags != 0):
-            print(f"No good data in chunk with index {chunk_id}. Skipping to next chunk")
-            continue
-
-        flag_mask = np.ones(np.shape(flags))
-        flag_mask[flags != 0] = np.nan
-
-        if t_obs_start is None:
-            t_obs_start = chunk.t_start
-            n_dets = chunk.signal.shape[1]
-            sample_rate = chunk.sample_rate
-            kids = chunk.kids
+            t_obs_start       = chunk.t_start
+            n_dets            = chunk.signal.shape[1]
+            sample_rate       = chunk.sample_rate
+            kids              = chunk.kids
             nominal_chunk_len = chunk.signal.shape[0]
 
-        t_obs_stop = chunk.t_stop
+            ra_sum = dec_sum = n_bore = n_chunks = psd_count = 0
 
-        ra_sum += chunk.ra_bore.sum()
-        dec_sum += chunk.dec_bore.sum()
-        n_bore += len(chunk.ra_bore)
-
-        if det_median_sum is None:
             det_median_sum = np.zeros(n_dets)
             det_diff_sum = np.zeros(n_dets)
             det_diff_sum_sq = np.zeros(n_dets)
             det_diff_count = np.zeros(n_dets, dtype=int)
 
-        det_median_sum += np.nanmedian(chunk.signal, axis=0)
+            psd_sum = None # will be initialized in Sxx section
 
-        diffs = chunk.signal[1:] * flag_mask[1:] - chunk.signal[:-1] * flag_mask[:-1]
+            init = True
+        # ------------------------------------------------------ #
 
+        # Create a copy of the signal with flagged points set to NaN
+        signal_masked = chunk.signal.astype(float, copy=True)
+        signal_masked[chunk.flags != 0] = np.nan
+
+        # Temporal differences and validity mask
+        diffs = signal_masked[1:] - signal_masked[:-1]
         valid_mask = np.isfinite(diffs)
-        det_diff_sum += np.nansum(diffs, axis=0)
-        det_diff_sum_sq += np.nansum((diffs ** 2), axis=0)
-        det_diff_count += np.sum(valid_mask, axis=0)
-        n_chunks += 1
 
+        # Advance accumulations
+        ra_sum          += chunk.ra_bore.sum()
+        dec_sum         += chunk.dec_bore.sum()
+        n_bore          += len(chunk.ra_bore)
+        det_median_sum  += np.nanmedian(chunk.signal, axis=0)
+        det_diff_sum    += np.nansum(diffs, axis=0)
+        det_diff_sum_sq += np.nansum((diffs ** 2), axis=0)
+        det_diff_count  += np.sum(valid_mask, axis=0)
+        n_chunks        += 1
+
+        # Sxx, adding per loop
         if chunk.signal.shape[0] == nominal_chunk_len:
             f, p = welch(chunk.signal, fs=sample_rate, window="hann", axis=0)
             if psd_sum is None:
@@ -205,207 +234,126 @@ def _first_pass(cfg: dict):
             psd_sum += p
             psd_count += 1
 
-    obs_info = dict(
-        t_start_g3s=t_obs_start,
-        t_stop_g3s=t_obs_stop,
-        duration_s=t_obs_stop - t_obs_start,
-        n_detectors=n_dets,
-        sample_rate_hz=sample_rate,
-        n_chunks=n_chunks,
-    )
+        # stop time is from last chunk
+        t_obs_stop = chunk.t_stop
 
-    var_diffs = (det_diff_sum_sq / det_diff_count) - (det_diff_sum / det_diff_count) ** 2
-    det_noise = np.sqrt(np.clip(var_diffs, 0, None)) / np.sqrt(2)
+    # Observation telemetry
+    obs_info = reader.packObsInfo(
+        t_obs_start, t_obs_stop, n_dets, sample_rate, n_chunks)
 
-    psd_avg = psd_sum / psd_count if psd_count > 0 else None
-    white_noise_floor = None
+    # Calculate detector noise variance from sample differences.
+    # Scaled by 1/sqrt{2} to correct for the variance doubling introduced by first-order differencing.
+    det_noise = tod.findNoise(
+        det_diff_sum, det_diff_sum_sq, det_diff_count)/np.sqrt(2)
 
-    if psd_avg is not None:
-        nyquist = sample_rate / 2
-        white_band = (psd_freqs > 0.4 * nyquist) & (psd_freqs < 0.9 * nyquist)
-        white_noise_floor = np.median(psd_avg[white_band, :], axis=0)
+    # Average Sxx across chunks
+    psd_avg = psd_sum/psd_count if psd_count>0 else None
 
-    return (ra_sum / n_bore, dec_sum / n_bore, det_median_sum / n_chunks,
-            det_noise, kids, obs_info, white_noise_floor, psd_avg, psd_freqs)
+    # Extract the white noise floor
+    white_noise_floor = tod.findWhiteNoiseFloor(
+        psd_avg, psd_freqs, sample_rate)
 
-
-# ============================================================================ #
-#   _check_psd_anomalies
-def _check_psd_anomalies(psd_avg: np.ndarray, psd_freqs: np.ndarray, pipe_cfg: dict) -> list:
-    psd_anomalies = []
-    if psd_avg is not None:
-        anomaly_sigma = pipe_cfg.get("psd_anomaly_sigma", 5.0)
-        if anomaly_sigma > 0:
-            psd_anomalies = find_psd_anomalies(psd_avg, psd_freqs, sigma=anomaly_sigma)
-            if psd_anomalies:
-                summary = ", ".join(f"{a['freq_hz']:.2f} Hz ({a['power_ratio_db']:.1f} dB)"
-                                    for a in psd_anomalies[:5])
-                print(f"  PSD anomalies flagged: {len(psd_anomalies)} ({summary}"
-                      f"{', ...' if len(psd_anomalies) > 5 else ''})")
-    return psd_anomalies
+    state = {
+        "ra0_auto": ra_sum/n_bore, 
+        "dec0_auto": dec_sum/n_bore, 
+        "det_offsets": det_median_sum/n_chunks, 
+        "det_noise": det_noise, 
+        "all_kids": kids, 
+        "obs_info": obs_info, 
+        "white_noise_floor": white_noise_floor, 
+        "psd_avg": psd_avg, 
+        "psd_freqs": psd_freqs
+    }
+    return state
 
 
 # ============================================================================ #
-#   _filter_detectors
-def _filter_detectors(all_kids: list, det_noise: np.ndarray, white_noise_floor: np.ndarray,
-                      pipe_cfg: dict) -> tuple[np.ndarray, np.ndarray, set, list, list, float]:
-    n_total = len(all_kids)
-    name_to_i = {k: i for i, k in enumerate(all_kids)}
-    exclude_set = set()
+# _step1
+def _step1(cfg: dict) -> dict:
+    """Orchestrates Step 1 of the mapmaking pipeline:
+    1. Executes the first data pass to gather baselines, noise, and PSD.
+    2. Determine excluded detectors.
+    3. Computes inverse-variance detector weights.
+    4. Resolves the map center (pinned config vs. target lookup vs. auto-boresight).
+    5. Sets up the spatial pixel grid edges.
+    """
 
-    manual_names = pipe_cfg.get("exclude_detectors", [])
-    manual_indices = pipe_cfg.get("exclude_detector_indices", [])
-    for nm in manual_names:
-        if nm in name_to_i:
-            exclude_set.add(name_to_i[nm])
-    for idx in manual_indices:
-        if 0 <= idx < n_total:
-            exclude_set.add(idx)
+    print(f"Step 1 (TOD stats, KID exclusions, map grid)")
 
-    auto_thresh = pipe_cfg.get("auto_exclude_threshold", 5.0)
-    auto_excluded = []
-    if auto_thresh > 0:
-        median_noise = np.median(det_noise)
-        cutoff_noise = auto_thresh * median_noise
-        auto_bad = np.where(det_noise > cutoff_noise)[0]
-        auto_excluded = [all_kids[i] for i in auto_bad]
-        exclude_set.update(auto_bad.tolist())
-        print(f"  Auto-exclusion: noise median={median_noise:.4f}  "
-              f"cutoff={cutoff_noise:.4f} ({auto_thresh}x)  "
-              f"excluded={len(auto_bad)}/{n_total}")
+    t0 = time.perf_counter()
+    t = t0
+    
+    # Run the initial data streaming pass:
+    # - Boresight pointing averages (for map center fallback).
+    # - Per-detector medians and noise estimates (via temporal differences).
+    # - Average PSD and white noise floor characteristics.
+    s_fp = _firstPass(cfg) # state var
 
-    if manual_names or manual_indices:
-        print(f"  Manual exclusion: {len(manual_names) + len(manual_indices)} detector(s)")
-
-    raw_keep_idx = np.array([i for i in range(n_total) if i not in exclude_set], dtype=int)
-
-    wnf_sigma = pipe_cfg.get("wnf_exclude_sigma", 3.0)
-    wnf_excluded = []
-    wnf_cutoff = None
-    if wnf_sigma > 0 and white_noise_floor is not None:
-        finite_wnf = np.isfinite(white_noise_floor) & (white_noise_floor > 0)
-        log_wnf = np.log10(white_noise_floor[finite_wnf])
-        wnf_cutoff = 10 ** (np.median(log_wnf) + wnf_sigma * np.std(log_wnf))
-        wnf_bad = np.where(finite_wnf & (white_noise_floor > wnf_cutoff))[0]
-        wnf_excluded = [all_kids[i] for i in wnf_bad]
-        exclude_set.update(wnf_bad.tolist())
-        print(f"  WNF-exclusion: cutoff={wnf_cutoff:.4g} (log-median+{wnf_sigma}sigma)  "
-              f"excluded={len(wnf_bad)}/{n_total}")
-
-    keep_idx = np.array([i for i in range(n_total) if i not in exclude_set], dtype=int)
-    print(f"  Using {len(keep_idx)}/{n_total} detectors")
-
-    return raw_keep_idx, keep_idx, exclude_set, auto_excluded, wnf_excluded, wnf_cutoff
-
-
-# ============================================================================ #
-#   _compute_detector_weights
-def _compute_detector_weights(white_noise_floor: np.ndarray, n_total: int, pipe_cfg: dict) -> np.ndarray:
-    weight_cap_factor = pipe_cfg.get("weight_cap_factor", 5.0)
-    det_weights = np.ones(n_total)
-    if weight_cap_factor > 0 and white_noise_floor is not None:
-        finite_wnf = np.isfinite(white_noise_floor) & (white_noise_floor > 0)
-        if np.any(finite_wnf):
-            det_weights[finite_wnf] = 1.0 / white_noise_floor[finite_wnf]
-            median_w = np.median(det_weights[finite_wnf])
-            det_weights = np.clip(det_weights, 0, weight_cap_factor * median_w)
-            det_weights[~finite_wnf] = median_w
-    return det_weights
-
-
-# ============================================================================ #
-#   _resolve_map_center
-def _resolve_map_center(cfg: dict, obs_info: dict, ra0_auto: float, dec0_auto: float) -> tuple[float, float, str]:
-    map_cfg = cfg["map"]
-    centre_pinned = "ra0_deg" in map_cfg and "dec0_deg" in map_cfg
-    target_name = map_cfg.get("target")
-
-    if centre_pinned:
-        return map_cfg["ra0_deg"], map_cfg["dec0_deg"], "config"
-    elif target_name:
-        site = None
-        if target.is_solar_system_body(target_name):
-            site = (get_blasttng_site(cfg) if cfg["data"]["format"] == "blasttng"
-                    else target.FYST_SITE)
-            if site is None:
-                raise RuntimeError(
-                    f"Can't resolve target '{target_name}': no lat/lon/alt telemetry "
-                    f"found in the data to compute its ephemeris position."
-                )
-        ra0_deg, dec0_deg = target.resolve_target(target_name, obs_info["t_start_g3s"], site=site)
-        return ra0_deg, dec0_deg, f"target lookup ({target_name})"
-    else:
-        return ra0_auto, dec0_auto, "auto (mean boresight)"
-
-
-# ============================================================================ #
-#   step_1_first_pass
-def step_1_first_pass(cfg: dict) -> dict:
-    map_cfg = cfg["map"]
-    pipe_cfg = cfg["pipeline"]
-    centre_pinned = "ra0_deg" in map_cfg and "dec0_deg" in map_cfg
-
-    print(f"Step 1: First pass ({'baselines only' if centre_pinned else 'baselines + map centre'})...")
+    print(f"  First pass done. [{time.perf_counter()-t:.1f} s]")
     t = time.perf_counter()
-    (ra0_auto, dec0_auto, det_offsets, det_noise, all_kids, obs_info,
-     white_noise_floor, psd_avg, psd_freqs) = _first_pass(cfg)
-    print(f"  Baselines: {det_offsets.min():.4f} - {det_offsets.max():.4f}  [{time.perf_counter()-t:.1f}s]")
 
-    psd_anomalies = _check_psd_anomalies(psd_avg, psd_freqs, pipe_cfg)
+    # Decide which detectors to excluded from maps, based on:
+    # - Manual lists.
+    # - Automated metrics (noise/std, white noise floor).
+    s_de = tod.excludedDetectors( # detector state
+        s_fp['all_kids'], s_fp['det_noise'], 
+        s_fp['white_noise_floor'], cfg["pipeline"])
 
-    raw_keep_idx, keep_idx, exclude_set, auto_excluded, wnf_excluded, wnf_cutoff = _filter_detectors(
-        all_kids, det_noise, white_noise_floor, pipe_cfg
-    )
+    print(f"  Detector exclusions done. [{time.perf_counter()-t:.1f} s]")
+    t = time.perf_counter()
 
-    n_total = len(all_kids)
-    det_weights = _compute_detector_weights(white_noise_floor, n_total, pipe_cfg)
+    # Find detector weights.
+    # This uses a static weight per detector:
+    # The inverse of the white noise floor (0.4 to 0.9 nyqist of PSD).
+    det_weights = tod.findWeights(
+        s_fp['white_noise_floor'], len(s_fp['all_kids']), cfg["pipeline"])
 
+    # Format observation time metadata for logging
     _G3_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    obs_utc = _G3_EPOCH + timedelta(seconds=obs_info["t_start_g3s"])
-    print(f"  Obs start  : {obs_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    print(f"  Duration   : {obs_info['duration_s']:.1f} s")
-    print(f"  Detectors  : {obs_info['n_detectors']} @ {obs_info['sample_rate_hz']:.1f} Hz")
+    obs_utc = _G3_EPOCH + timedelta(seconds=s_fp['obs_info']["t_start_g3s"])
+    print(f"  Obs start: {obs_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print(f"  Duration: {s_fp['obs_info']['duration_s']:.1f} s")
+    print(f"  Detectors: {s_fp['obs_info']['n_detectors']} @ {s_fp['obs_info']['sample_rate_hz']:.1f} Hz")
 
-    ra0_deg, dec0_deg, centre_source = _resolve_map_center(cfg, obs_info, ra0_auto, dec0_auto)
+    # Determine the central RA/Dec coordinate for the map grid
+    s_ma = coord.resolveMapCenter( # map state
+        cfg, s_fp['obs_info'], s_fp['ra0_auto'], s_fp['dec0_auto'])
 
-    res_deg = map_cfg["res_arcmin"] / 60.0
-    ra_edges, dec_edges = make_map_edges(
-        ra0_deg=ra0_deg, dec0_deg=dec0_deg,
-        xlen_deg=map_cfg["xlen_deg"], ylen_deg=map_cfg["ylen_deg"],
-        res_deg=res_deg,
+    # Construct coord pixel grid boundaries (edges)
+    s_ma |= map.makeMapEdges( # add to map state dict
+        ra0_deg=s_ma['ra0_deg'], dec0_deg=s_ma['dec0_deg'],
+        xlen_deg=cfg["map"]["xlen_deg"], ylen_deg=cfg["map"]["ylen_deg"],
+        res_deg=cfg["map"]["res_arcmin"]/60.0,
     )
-    ny, nx = len(dec_edges) - 1, len(ra_edges) - 1
-    print(f"  Map grid   : {ny} x {nx} pixels ({map_cfg['res_arcmin']:.1f} arcmin/pixel), "
-          f"centre = ({ra0_deg:.4f}, {dec0_deg:.4f}) [{centre_source}]")
 
+    print(f"  Map grid: {s_ma['ny']} x {s_ma['nx']} pixels", end="")
+    print(f" ({cfg["map"]['res_arcmin']:.1f} arcmin/pixel)")
+    print(f", centre = ({s_ma['ra0_deg']:.4f}, {s_ma['dec0_deg']:.4f}) [{s_ma['centre_source']}]")
+
+    # Return a dictionary containing all computed parameters for subsequent pipeline steps
     return {
-        "det_offsets": det_offsets,
-        "all_kids": all_kids,
-        "obs_info": obs_info,
+        "det_offsets": s_fp['det_offsets'],
+        "all_kids": s_fp['all_kids'],
+        "obs_info": s_fp['obs_info'],
         "obs_utc": obs_utc,
-        "white_noise_floor": white_noise_floor,
-        "psd_avg": psd_avg,
-        "psd_freqs": psd_freqs,
-        "psd_anomalies": psd_anomalies,
-        "raw_keep_idx": raw_keep_idx,
-        "keep_idx": keep_idx,
-        "exclude_set": exclude_set,
-        "auto_excluded": auto_excluded,
-        "wnf_excluded": wnf_excluded,
-        "wnf_cutoff": wnf_cutoff,
+        "white_noise_floor": s_fp['white_noise_floor'],
+        "psd_avg": s_fp['psd_avg'],
+        "psd_freqs": s_fp['psd_freqs'],
+        "keep_idx": s_de['keep_idx'],
+        "exclude_set": s_de['exclude_set'],
+        "auto_excluded": s_de['noise_excluded'],
+        "wnf_excluded": s_de['wnf_excluded'],
+        "wnf_cutoff": s_de['wnf_cutoff'],
         "det_weights": det_weights,
-        "ra0_deg": ra0_deg,
-        "dec0_deg": dec0_deg,
-        "ra_edges": ra_edges,
-        "dec_edges": dec_edges,
-        "ny": ny,
-        "nx": nx,
-        "kids_kept": [all_kids[i] for i in keep_idx],
-        "raw_det_offsets_kept": det_offsets[raw_keep_idx],
-        "raw_kids_kept": [all_kids[i] for i in raw_keep_idx],
-        "det_weights_kept": det_weights[keep_idx],
-        "raw_det_weights_kept": det_weights[raw_keep_idx],
-        "det_offsets_kept": det_offsets[keep_idx],
+        "ra0_deg": s_ma['ra0_deg'],
+        "dec0_deg": s_ma['dec0_deg'],
+        "ra_edges": s_ma['ra_edges'],
+        "dec_edges": s_ma['dec_edges'],
+        "ny": s_ma['ny'],
+        "nx": s_ma['nx'],
+        "kids_kept": [s_fp['all_kids'][i] for i in s_de['keep_idx']],
+        "det_weights_kept": det_weights[s_de['keep_idx']],
+        "det_offsets_kept": s_fp['det_offsets'][s_de['keep_idx']],
     }
 
 
@@ -462,7 +410,7 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
     kids_sel = sel_idx = None
     det_data = det_hits = None
 
-    for chunk in iter_chunks(cfg, apply_offsets=apply_offsets):
+    for chunk in reader.iter_chunks(cfg, apply_offsets=apply_offsets):
         if kids_sel is None:
             kids_sel, sel_idx = _resolve_det_selection(chunk.kids, pd_cfg)
             n_sel = len(kids_sel)
@@ -474,7 +422,7 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
         flag_mask[flags != 0] = np.nan
         sig = chunk.signal - det_offsets[np.newaxis, :]
 
-        sig, new_flags = clean_tod(sig, flag_mask, chunk.sample_rate,
+        sig, new_flags = tod.clean_tod(sig, flag_mask, chunk.sample_rate,
                                    steps=pipe_cfg.get("clean_steps", []),
                                    step_params={
                                        "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
@@ -489,7 +437,7 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
                 ra, dec = chunk.ra[:, i], chunk.dec[:, i]
             else:
                 ra, dec = chunk.ra_bore, chunk.dec_bore
-            d, h = bin_detector(sig[:, i], bin_flag_mask[:, i], ra, dec, ra_edges, dec_edges)
+            d, h = map.bin_detector(sig[:, i], bin_flag_mask[:, i], ra, dec, ra_edges, dec_edges)
             det_data[j] += d
             det_hits[j] += h
 
@@ -540,7 +488,7 @@ def step_1b_shift_correction(cfg: dict, step1_res: dict) -> tuple[dict | None, t
     pd_results = None
 
     if cfg["data"]["format"] == "blasttng":
-        baked_shifts = get_blasttng_baked_shifts(cfg)
+        baked_shifts = reader.get_blasttng_baked_shifts(cfg)
         if baked_shifts:
             kid_shifts = baked_shifts
             print(f"\nStep 1b: Using pre-baked per-detector shifts from the calibration "
@@ -609,7 +557,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
     psd_raw = psd_cm = None
     tod_rms_data: list = []
 
-    # --- Configure cleaning steps used by clean_tod ---
+    # Configure cleaning steps used by clean_tod
     clean_steps = pipe_cfg.get("clean_steps", [])
     step_params = {
         "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
@@ -617,7 +565,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
         "notch":       pipe_cfg.get("notch", {}),
     }
 
-    # --- Prepare per-detector shifts (if provided) ---
+    # Prepare per-detector shifts (if provided)
     # kid_shifts is expected to be a dict mapping detector-name -> (dr, ddec)
     # kids_kept should be the list of detector names in the same column order
     shift_ra = shift_dec = None
@@ -627,7 +575,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
         shift_ra = np.array([kid_shifts.get(k, (0.0, 0.0))[0] for k in kids_kept])
         shift_dec = np.array([kid_shifts.get(k, (0.0, 0.0))[1] for k in kids_kept])
 
-    for chunk in iter_chunks(cfg):
+    for chunk in reader.iter_chunks(cfg):
         flags = chunk.flags
         chunk_id = chunk.chunk_index
         if np.all(flags != 0):
@@ -664,7 +612,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
                 dec = dec + shift_dec
 
         if clean_steps:
-            sig, new_flags = clean_tod(sig, flag_mask, chunk.sample_rate,
+            sig, new_flags = tod.clean_tod(sig, flag_mask, chunk.sample_rate,
                                        steps=clean_steps,
                                        step_params=step_params)
             if new_flags is None:
@@ -688,10 +636,10 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
 
         if common_mode:
             if current_map is not None:
-                sig = iterate_common_mode(sig, flag_mask, ra, dec,
+                sig = tod.iterate_common_mode(sig, flag_mask, ra, dec,
                                           current_map, ra_edges, dec_edges)
             else:
-                sig = subtract_common_mode(sig, estimate_common_mode(sig, flag_mask))
+                sig = tod.subtract_common_mode(sig, tod.estimate_common_mode(sig, flag_mask))
 
         if return_sample and psd_cm is None:
             psd_cm = sig.copy() * flag_mask
@@ -700,7 +648,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
             rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
             tod_rms_data.append((chunk.t_start, rms_raw, rms_cm))
 
-        d, h, sq = bin_chunk(sig, bin_flag_mask, ra, dec, ra_edges, dec_edges, weights=weights)
+        d, h, sq = map.bin_chunk(sig, bin_flag_mask, ra, dec, ra_edges, dec_edges, weights=weights)
         total_data += d
         total_hits += h
         total_sumsq += sq
@@ -714,7 +662,7 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
             for dhalf in (0, 1):
                 m = det_half == dhalf
                 w_half = weights[m] if weights is not None else None
-                d_ds, h_ds, _ = bin_chunk(sig[:, m], bin_flag_mask[:, m], ra[:, m], dec[:, m],
+                d_ds, h_ds, _ = map.bin_chunk(sig[:, m], bin_flag_mask[:, m], ra[:, m], dec[:, m],
                                           ra_edges, dec_edges, weights=w_half)
                 detsplit_data[dhalf] += d_ds
                 detsplit_hits[dhalf] += h_ds
@@ -743,28 +691,8 @@ def _streaming_pass(cfg: dict, pipe_cfg: dict,
 
 
 # ============================================================================ #
-# STEPS 1c, 2, & 3: MAPMAKING PASSES
+# STEPS 2, & 3: MAPMAKING PASSES
 # ============================================================================ #
-
-
-# ============================================================================ #
-#   step_1c_raw_map
-def step_1c_raw_map(cfg: dict, step1_res: dict, kid_shifts: dict | None) -> np.ndarray:
-    pipe_cfg = cfg["pipeline"]
-    t = time.perf_counter()
-    n_total = len(step1_res["all_kids"])
-    print(f"\nStep 1c: Raw map ({len(step1_res['raw_keep_idx'])}/{n_total} detectors, "
-          f"manual+auto exclusion only)...")
-
-    raw_map, _, _, _, _, _, _, _, _ = _streaming_pass(
-        cfg, pipe_cfg, step1_res["ra_edges"], step1_res["dec_edges"],
-        step1_res["raw_det_offsets_kept"], common_mode=False,
-        keep_idx=step1_res["raw_keep_idx"], kids_kept=step1_res["raw_kids_kept"],
-        kid_shifts=kid_shifts, weights=step1_res["raw_det_weights_kept"],
-        compute_time_null=pipe_cfg.get("compute_time_null", True)
-    )
-    print(f"  [{time.perf_counter() - t:.1f}s]")
-    return raw_map
 
 
 # ============================================================================ #
@@ -896,7 +824,6 @@ def _build_metadata(cfg: dict, step1_res: dict, cm_maps: list, pass_times: list,
         "map_weighting": ("inverse_variance_white_noise_floor"
                           if pipe_cfg.get("weight_cap_factor", 5.0) > 0 else "uniform"),
         "weight_cap_factor": pipe_cfg.get("weight_cap_factor", 5.0),
-        "psd_anomalies": step1_res["psd_anomalies"],
         "n_detectors_used": len(step1_res["keep_idx"]),
         "n_detectors_excluded": len(step1_res["exclude_set"]),
         "auto_excluded_detectors": step1_res["auto_excluded"],
@@ -921,8 +848,11 @@ def _build_metadata(cfg: dict, step1_res: dict, cm_maps: list, pass_times: list,
 
 # ============================================================================ #
 #   step_4_save_outputs
-def step_4_save_outputs(cfg: dict, step1_res: dict, step2_res: dict, raw_map: np.ndarray,
-                        cm_maps: list, pass_times: list, t_total: float) -> tuple[str, dict]:
+def step_4_save_outputs(
+        cfg: dict, step1_res: dict, step2_res: dict,
+        cm_maps: list, pass_times: list, t_total: float
+        ) -> tuple[str, dict]:
+    
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     n_dets = step1_res["obs_info"]["n_detectors"]
     out_dir = os.path.join(pathlib.Path(cfg["output"]["output_dir"]),
@@ -931,7 +861,7 @@ def step_4_save_outputs(cfg: dict, step1_res: dict, step2_res: dict, raw_map: np
     output.save_iteration_maps(
         step2_res["naive"], cm_maps, step2_res["hits"], step2_res["noise_map"],
         step2_res["null_map"], step1_res["ra_edges"], step1_res["dec_edges"],
-        out_dir, cfg["output"], raw_map=raw_map, detsplit_null=step2_res["detsplit_null_map"]
+        out_dir, cfg["output"], detsplit_null=step2_res["detsplit_null_map"]
     )
 
     output.plot_wnf_diagnostic(
@@ -1062,46 +992,36 @@ def finish_run(args, profiler: cProfile.Profile, out_dir: str, elapsed: float) -
 # ============================================================================ #
 #   main
 def main():
-    parser = argparse.ArgumentParser(description="CCAT Quick-Look Mapmaker")
-    parser.add_argument("--config", default="config.toml", help="Path to config file (default: config.toml)")
-    parser.add_argument("--profile", action="store_true", help="Print timing bottlenecks on exit")
-    args = parser.parse_args()
 
-    profiler = cProfile.Profile()
-    if args.profile:
-        profiler.enable()
+    print(f"{'='*60}\nCCAT Quick-Look Mapmaker\n{'='*60}")
 
-    cfg, config_path = load_configuration(args.config)
     t_total = time.perf_counter()
 
-    print("=" * 60)
-    print("CCAT Quick-Look Mapmaker")
-    print("=" * 60)
-    print(f"Config : {config_path}")
-    for d in cfg['data']['input_dirs']:
-        print(f"Input  : {d}")
-    print(f"Format : {cfg['data']['format']}")
-    print(f"Output : {cfg['output']['output_dir']}\n")
+    args = _setupArgParser()
+    prof = _setupProfiler()
+    cfgs = _loadConfiguration(args.config)
 
-    step_0_probe_medians(cfg)
+    step_0_probe_medians(cfgs) # only used for BLAST-TNG. Very slow.
 
-    step1_res = step_1_first_pass(cfg)
+    state_1 = _step1(cfgs)
 
-    kid_shifts, pd_results = step_1b_shift_correction(cfg, step1_res)
+    # TODO: audit from here
 
-    raw_map = step_1c_raw_map(cfg, step1_res, kid_shifts)
+    kid_shifts, pd_results = step_1b_shift_correction(cfgs, state_1)
 
-    step2_res = step_2_naive_and_initial_cm(cfg, step1_res, kid_shifts)
+    step2_res = step_2_naive_and_initial_cm(cfgs, state_1, kid_shifts)
 
-    combined_map, cm_maps, pass_times = step_3_iterations(cfg, step1_res, step2_res, kid_shifts)
+    combined_map, cm_maps, pass_times = step_3_iterations(
+        cfgs, state_1, step2_res, kid_shifts)
 
-    out_dir, metadata = step_4_save_outputs(cfg, step1_res, step2_res, raw_map, cm_maps, pass_times, t_total)
+    out_dir, metadata = step_4_save_outputs(
+        cfgs, state_1, step2_res, cm_maps, pass_times, t_total)
 
-    step_5_boresight_comparison(cfg, step1_res, combined_map, out_dir)
+    step_5_boresight_comparison(cfgs, state_1, combined_map, out_dir)
 
-    step_6_per_detector_maps(cfg, step1_res, pd_results, out_dir, metadata)
+    step_6_per_detector_maps(cfgs, state_1, pd_results, out_dir, metadata)
 
-    finish_run(args, profiler, out_dir, time.perf_counter() - t_total)
+    finish_run(args, prof, out_dir, time.perf_counter() - t_total)
 
 
 if __name__ == "__main__":

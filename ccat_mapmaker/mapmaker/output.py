@@ -2,7 +2,7 @@
 # output.py
 # Save map outputs to disk.
 #
-# James Burgoyne, jburgoyne@phas.ubc.ca
+# James Burgoyne, jamesrburgoyne@icloud.com
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
 # CCAT August 2026
@@ -155,7 +155,6 @@ def save_iteration_maps(naive: np.ndarray,
                         ra_edges: np.ndarray, dec_edges: np.ndarray,
                         output_dir: pathlib.Path,
                         out_cfg: dict,
-                        raw_map: np.ndarray = None,
                         detsplit_null: np.ndarray = None):
     """
     Save naive map, CM iteration maps, hits, noise, and null to disk.
@@ -166,9 +165,6 @@ def save_iteration_maps(naive: np.ndarray,
            show no residual structure if the combined map's features are
            real signal rather than noise (a jackknife/null test). None if
            run_mapmaker._streaming_pass(compute_time_null=False) -- skipped.
-    raw_map: optional naive-style map (no common-mode) using manual+auto
-             exclusion only, comparison reference against `naive`/cm_maps,
-             which additionally exclude white-noise-floor outliers.
     detsplit_null: optional null map from a random 50/50 *detector*-identity
              split (vs. `time_null`'s chunk- time split) -- see
              run_mapmaker._streaming_pass(compute_detsplit_null=True).
@@ -183,8 +179,7 @@ def save_iteration_maps(naive: np.ndarray,
     all_maps = [("naive", naive)] + cm_maps + [("hits", hits), ("noise", noise)]
     if null is not None:
         all_maps.append(("null", null))
-    if raw_map is not None:
-        all_maps.append(("raw", raw_map))
+
     if detsplit_null is not None:
         all_maps.append(("detsplit_null", detsplit_null))
 
@@ -207,12 +202,7 @@ def save_iteration_maps(naive: np.ndarray,
                       title=_pretty_title(label),
                       cmap=CMAP_SIGNAL, vmin=sig_vmin, vmax=sig_vmax,
                       cbar_label="Signal")
-        if raw_map is not None:
-            _plot_map(raw_map, ra_edges, dec_edges,
-                      filepath=output_dir / "raw.png",
-                      title="Raw Map (manual+auto exclusion only)",
-                      cmap=CMAP_SIGNAL, vmin=sig_vmin, vmax=sig_vmax,
-                      cbar_label="Signal")
+
         if null is not None:
             null_vmin, null_vmax = _global_scale([("null", null)])
             _plot_map(null, ra_edges, dec_edges,

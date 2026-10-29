@@ -1,10 +1,10 @@
 # ============================================================================ #
-# binning.py
+# map.py
 #
-# James Burgoyne, jburgoyne@phas.ubc.ca
+# James Burgoyne, jamesrburgoyne@icloud.com
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
-# CCAT August 2026
+# CCAT 2026
 #
 # Sky map pixelization: bin detector timestreams into a 2-D map.
 #
@@ -18,18 +18,18 @@ import numpy as np
 
 
 # ============================================================================ #
-# make_map_edges
-# ============================================================================ #
-def make_map_edges(ra0_deg: float, dec0_deg: float,
-                   xlen_deg: float, ylen_deg: float,
-                   res_deg: float):
-    """
-    Create RA and Dec bin-edge arrays defining the pixel grid.
+# makeMapEdges
+def makeMapEdges(
+        ra0_deg: float, dec0_deg: float,
+        xlen_deg: float, ylen_deg: float, 
+        res_deg: float):
+    """Create RA and Dec bin-edge arrays defining the pixel grid.
 
     Grid is centred at (ra0_deg, dec0_deg), spans xlen_deg x ylen_deg degrees,
     with square pixels of size res_deg. Returns (nx+1,) and (ny+1,) edge arrays
     where nx = int(xlen_deg / res_deg), ny = int(ylen_deg / res_deg).
     """
+
     nx = int(xlen_deg / res_deg)
     ny = int(ylen_deg / res_deg)
 
@@ -37,13 +37,18 @@ def make_map_edges(ra0_deg: float, dec0_deg: float,
                             ra0_deg  + xlen_deg / 2, nx + 1)
     dec_edges = np.linspace(dec0_deg - ylen_deg / 2,
                             dec0_deg + ylen_deg / 2, ny + 1)
-    return ra_edges, dec_edges
+
+    return {
+        'ra_edges': ra_edges,
+        'dec_edges': dec_edges,
+        'nx': nx,
+        'ny': ny
+    }
 
 
 # ============================================================================ #
 # bin_detector
 # This is only really used for the per detector maps right now
-# ============================================================================ #
 def bin_detector(tod_1d: np.ndarray, flag_mask_1d: np.ndarray,
                  ra_1d: np.ndarray, dec_1d: np.ndarray,
                  ra_edges: np.ndarray, dec_edges: np.ndarray,
@@ -67,7 +72,6 @@ def bin_detector(tod_1d: np.ndarray, flag_mask_1d: np.ndarray,
 
 # ============================================================================ #
 # bin_chunk
-# ============================================================================ #
 def bin_chunk(signal: np.ndarray, flag_mask: np.ndarray,
               ra: np.ndarray, dec: np.ndarray,
               ra_edges: np.ndarray, dec_edges: np.ndarray,

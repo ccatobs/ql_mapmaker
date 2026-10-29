@@ -4,7 +4,7 @@
 # James Burgoyne, jamesrburgoyne@icloud.com
 # Audrey Yang, audyang@student.ubc.ca
 # Vlad Grecu, vlad.grecu07@gmail.com
-# CCAT August 2026
+# CCAT 2026
 # ============================================================================ #
 """
 Reads .g3 and .h5 files and yields fixed-duration Chunk objects for the
@@ -51,10 +51,10 @@ from typing import Iterator, Optional
 import numpy as np
 import h5py
 from dataclasses import dataclass
-from spt3g import core
+from spt3g import core # type: ignore
 
-from .pointing import precompute_det_directions, boresight_to_radec, det_radec_from_boresight
-from .signal import iq_to_df_angle, iq_to_df_gradient, iq_to_df_hybrid, normalize_tod
+from mapmaker.coord import precompute_det_directions, boresight_to_radec, det_radec_from_boresight
+from mapmaker.tod import iq_to_df_angle, iq_to_df_gradient, iq_to_df_hybrid, normalize_tod
 
 
 # ============================================================================ #
@@ -300,6 +300,22 @@ def _iter_h5_lab_chunks(files: list, chunk_duration_s: float, apply_offsets: boo
 # ============================================================================ #
 # G3 SIMULATION FORMAT
 # ============================================================================ #
+
+
+# ============================================================================ #
+# _packObsInfo
+def packObsInfo(t_obs_start, t_obs_stop, n_dets, sample_rate, n_chunks):
+    """G3 expected obs_info.
+    """
+
+    return {
+        't_start_g3s' :t_obs_start,
+        't_stop_g3s'  :t_obs_stop,
+        'duration_s'  :t_obs_stop - t_obs_start,
+        'n_detectors' :n_dets,
+        'sample_rate_hz' :sample_rate,
+        'n_chunks'    :n_chunks,
+    }
 
 
 # ============================================================================ #

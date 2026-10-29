@@ -38,6 +38,8 @@ from scipy.ndimage import gaussian_filter
 import tomli as toml # tomllib after python 3.11
 from datetime import datetime, timedelta, timezone
 
+from spt3g import core # type: ignore
+
 from mapmaker import tod
 from mapmaker import map
 from mapmaker import coord
@@ -118,7 +120,7 @@ def _precalcChunkTotal(cfg):
     """
 
     if cfg["data"]["format"] == "lab":
-        
+
         total_chunks = 0
         file_fmt = cfg["data"]["file_format"]
         chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
@@ -135,59 +137,44 @@ def _precalcChunkTotal(cfg):
                 if "timestream" not in f:
                     continue
                 timestream_grp = f["timestream"]
-                blocks = list(timestream_grp.keys())
-                if not blocks:
-                    continue
-
-                first_block = blocks[0]
-                if "frames" not in timestream_grp[first_block]:
-                    continue
-                frames_grp = timestream_grp[first_block]["frames"]
-                frame_keys = sorted([k for k in frames_grp.keys() if k.isdigit()], key=int)
-
-                for fk in frame_keys:
-                    sample_block = frames_grp[fk]
-                    frame_type = sample_block.attrs.get("frame_type", b"")
-                    if isinstance(frame_type, bytes):
-                        frame_type = frame_type.decode("utf-8")
-
-                    if frame_type != "Scan":
+                for block in timestream_grp.keys():
+                    frames_grp = timestream_grp[block].get("frames")
+                    if frames_grp is None:
                         continue
-
-                    min_samps = None
-                    reference_times = None
-
-                    for block in blocks:
-                        block_frame_path = f"timestream/{block}/frames/{fk}"
-                        if block_frame_path not in f:
-                            continue
-                        b_frame = f[block_frame_path]
-                        
-                        if "data" not in b_frame or "times" not in b_frame["data"]:
+                    
+                    for fk in sorted([k for k in frames_grp.keys() if k.isdigit()], key=int):
+                        b_frame = frames_grp[fk]
+                        frame_type = b_frame.attrs.get("frame_type", b"")
+                        if isinstance(frame_type, bytes):
+                            frame_type = frame_type.decode("utf-8")
+                        if frame_type != "Scan":
                             continue
 
-                        times_ds = b_frame["data"]["times"][:]
-                        n_samps = len(times_ds)
-                        if min_samps is None or n_samps < min_samps:
-                            min_samps = n_samps
-                        if reference_times is None:
-                            reference_times = times_ds
+                        min_samps = None
+                        ref_times = None
+                        for b in timestream_grp.keys():
+                            sub_frame = timestream_grp[f"{b}/frames/{fk}"]
+                            if "data" in sub_frame and "times" in sub_frame["data"]:
+                                times_ds = sub_frame["data"]["times"][:]
+                                n_samps = len(times_ds)
+                                if min_samps is None or n_samps < min_samps:
+                                    min_samps = n_samps
+                                    ref_times = times_ds
 
-                    if not min_samps or min_samps == 0:
-                        continue
+                        if not min_samps:
+                            continue
 
-                    # Estimate sample rate from first frame if not already found
-                    if sample_rate_ref is None and reference_times is not None:
-                        t_start = reference_times[0] / 1.0 # core.G3Units.s equivalent if needed
-                        t_stop = reference_times[-1] / 1.0
-                        if t_stop > t_start:
-                            sample_rate_ref = min_samps / (t_stop - t_start)
-                    
-                    sample_rate = sample_rate_ref if sample_rate_ref is not None else 1.0
-                    chunk_n = max(1, int(chunk_duration_s * sample_rate)) if chunk_duration_s > 0 else min_samps
-                    
-                    # Each lab frame gets re-chunked, so add the chunks produced by this frame
-                    total_chunks += math.ceil(min_samps / chunk_n)
+                        if sample_rate is None and ref_times is not None:
+                            t_start = ref_times[0] / core.G3Units.s
+                            t_stop = ref_times[-1] / core.G3Units.s
+                            if t_stop > t_start:
+                                sample_rate = min_samps / (t_stop - t_start)
+
+                        total_samples += min_samps
+
+        sr = sample_rate if sample_rate is not None else 1.0
+        chunk_n = max(1, int(chunk_duration_s * sr)) if chunk_duration_s > 0 else total_samples
+        total_chunks = math.ceil(total_samples / chunk_n) if total_samples > 0 else None
 
         return {
             'total_chunks': total_chunks

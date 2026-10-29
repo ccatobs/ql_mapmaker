@@ -13,7 +13,6 @@ from typing import Optional
 from astropy.time import Time
 from astropy.coordinates import EarthLocation, SkyCoord, get_body
 import astropy.units as u
-from mapmaker.reader import get_blasttng_site
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -77,19 +76,9 @@ def resolveSite(
 
     map_cfg = cfg.get("map", {})
     
-    is_blasttng = (
-        cfg.get("data", {}).get("format") == "blasttng" 
-        or map_cfg.get("site") == "blasttng"
-    )
-
-    if is_blasttng:
-        # Dymamic site from telemetry
-        site = get_blasttng_site(cfg)
-
-    else:
-        # Look up static sites (e.g., "fyst" -> target.FYST_SITE)
-        site_name = map_cfg.get("site", "fyst")
-        site = globals().get(f"{site_name.upper()}_SITE")
+    # Look up static sites (e.g., "fyst" -> target.FYST_SITE)
+    site_name = map_cfg.get("site", "fyst")
+    site = globals().get(f"{site_name.upper()}_SITE")
     
     return site
 

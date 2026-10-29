@@ -45,8 +45,8 @@ from mapmaker import reader
 
 
 # ============================================================================ #
-#   resolve_paths
-def resolve_paths(cfg: dict, config_path: pathlib.Path) -> dict:
+# _resolvePaths
+def _resolvePaths(cfg: dict, config_path: pathlib.Path) -> dict:
     cfg_dir = config_path.parent.resolve()
 
     def resolve(path_str: str) -> str:
@@ -57,6 +57,7 @@ def resolve_paths(cfg: dict, config_path: pathlib.Path) -> dict:
 
     cfg["data"]["input_dirs"] = [resolve(d) for d in cfg["data"]["input_dirs"]]
     cfg["output"]["output_dir"] = resolve(cfg["output"]["output_dir"])
+
     return cfg
 
 
@@ -71,7 +72,7 @@ def _loadConfiguration(config_path_str: str) -> tuple[dict, pathlib.Path]:
     config_path = pathlib.Path(config_path_str)
     with open(config_path, "rb") as f:
         cfg = toml.load(f)
-    cfg = resolve_paths(cfg, config_path)
+    cfg = _resolvePaths(cfg, config_path)
 
     print(f"Config : {config_path}")
     for d in cfg['data']['input_dirs']:
@@ -139,56 +140,6 @@ def _printLoadingBar(iteration, total, length=40):
 # ============================================================================ #
 # == STEPS
 # ============================================================================ #
-
-# ============================================================================ #
-# step_0_probe_medians
-def step_0_probe_medians(cfg: dict) -> None:
-    if cfg["data"]["format"] == "blasttng":
-        print("Step 0: Calculating BLAST-TNG probe tone medians...")
-        t = time.perf_counter()
-        base_out_dir = pathlib.Path(cfg["output"]["output_dir"])
-        tod._compute_blasttng_probe_medians(cfg, str(base_out_dir))
-        print(f"  Probe tones found. [{time.perf_counter()-t:.1f}s]")
-
-
-# ============================================================================ #
-#   _compute_blasttng_probe_medians
-def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
-    os.makedirs(out_dir, exist_ok=True)
-    save_path = os.path.join(out_dir, "blasttng_probe_medians.npz")
-
-    if os.path.exists(save_path):
-        print(f"  Found cached probe medians: {save_path}")
-        with np.load(save_path) as data:
-            kids = data["kids"]
-            medians = data["medians"]
-            return dict(zip(kids, medians))
-
-    first_chunk = next(reader.iter_chunks(cfg))
-    kids = first_chunk.kids
-    n_dets = len(kids)
-
-    det_medians = np.zeros(n_dets, dtype=float)
-
-    print(f"  Computing probe tone medians across all chunks for {n_dets} detectors...")
-    for i in range(n_dets):
-        det_tod_list = []
-        for chunk in reader.iter_chunks(cfg):
-            flags = chunk.flags[:, i] if chunk.flags.ndim > 1 else chunk.flags
-            # sig_i = chunk.signal[:, i].copy()
-            # sig_i[flags != 0] = np.nan
-            # det_tod_list.append(sig_i)
-            sig_i = np.where(flags == 0, chunk.signal[:, i], np.nan)
-            det_tod_list.append(sig_i)
-
-        full_det_tod = np.concatenate(det_tod_list)
-        det_medians[i] = np.nanmedian(full_det_tod)
-
-        del det_tod_list, full_det_tod
-
-    np.savez(save_path, kids=np.array(kids), medians=det_medians)
-    print(f"  Saved probe medians to: {save_path}")
-    return dict(zip(kids, det_medians))
 
 
 # ============================================================================ #
@@ -500,42 +451,6 @@ def _compute_shifts_from_pd_results(pd_results: tuple, ra_edges: np.ndarray, dec
 
     print(f"  Computed shifts for {len(kid_shifts)}/{len(kids_sel)} detectors (S/N >= {min_snr})")
     return kid_shifts
-
-
-# ============================================================================ #
-#   step_1b_shift_correction
-def step_1b_shift_correction(cfg: dict, step1_res: dict) -> tuple[dict | None, tuple | None]:
-    pipe_cfg = cfg["pipeline"]
-    pd_cfg = cfg.get("per_detector", {})
-    ra_edges, dec_edges = step1_res["ra_edges"], step1_res["dec_edges"]
-    det_offsets = step1_res["det_offsets"]
-
-    kid_shifts = None
-    pd_results = None
-
-    if cfg["data"]["format"] == "blasttng":
-        baked_shifts = reader.get_blasttng_baked_shifts(cfg)
-        if baked_shifts:
-            kid_shifts = baked_shifts
-            print(f"\nStep 1b: Using pre-baked per-detector shifts from the calibration "
-                  f"frame ({len(kid_shifts)} detectors) -- skipping empirical computation.")
-
-    if cfg["data"]["format"] == "blasttng" and pd_cfg.get("enabled", False):
-        label = "Per-detector maps" if kid_shifts is not None else "Per-detector maps (for shift correction)"
-        print(f"\nStep 1b: {label}...")
-        t = time.perf_counter()
-        kids_sel, det_data, det_hits = _per_detector_pass(
-            cfg, pipe_cfg, pd_cfg, ra_edges, dec_edges, det_offsets,
-        )
-        print(f"  Pass complete [{time.perf_counter() - t:.1f}s]")
-        pd_results = (kids_sel, det_data, det_hits)
-
-    if kid_shifts is None and pd_results is not None:
-        kid_shifts = _compute_shifts_from_pd_results(
-            pd_results, ra_edges, dec_edges, step1_res["ra0_deg"], step1_res["dec0_deg"], pd_cfg
-        )
-
-    return kid_shifts, pd_results
 
 
 
@@ -864,11 +779,6 @@ def _build_metadata(cfg: dict, step1_res: dict, cm_maps: list, pass_times: list,
         },
     }
 
-    if cfg["data"]["format"] == "blasttng":
-        blasttng_cfg = cfg.get("blasttng", {})
-        metadata["df_method"] = blasttng_cfg.get("df_method", "hybrid")
-        metadata["threshold_frac"] = blasttng_cfg.get("threshold_frac", 0.05)
-
     return metadata
 
 
@@ -1026,15 +936,11 @@ def main():
     args = _setupArgParser()
     prof = _setupProfiler(args)
     cfgs = _loadConfiguration(args.config)
-    cfgs |= reader._precalcChunkTotal(cfgs) # if possible
-
-    # step_0_probe_medians(cfgs) # only used for BLAST-TNG. Very slow.
+    cfgs |= reader._precalcChunkTotal(cfgs) # if possible ("lab" only right now)
 
     state_1 = _step1(cfgs)
 
     # TODO: audit from here
-
-    kid_shifts, pd_results = step_1b_shift_correction(cfgs, state_1)
 
     step2_res = step_2_naive_and_initial_cm(cfgs, state_1, kid_shifts)
 

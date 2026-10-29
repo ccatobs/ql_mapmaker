@@ -21,11 +21,6 @@ pipeline. Three source formats, three ingestion paths:
     slicing so chunks are read straight off disk (_iter_h5_simulation_chunks),
     no frame buffering needed.
 
-  g3 blasttng (real BLAST-TNG data):
-    Calibration frame: per-KID target sweeps (+ optional cal-lamp exposure).
-    Scan frames: raw I/Q, converted to df against each KID's sweep.
-    Also streamed, so also goes through _rechunk.
-
   h5 lab
     Most recent h5 files in draft CCAT format.
 
@@ -96,10 +91,7 @@ class Chunk:
 
 # ── Frame buffering (shared by streamed g3 formats) ─────────────────────────
 #
-# Both g3 ingestion paths (simulation and blasttng) below stream through this
-# to turn variable-length frames into fixed-duration Chunks. The h5
-# simulation path doesn't use it -- HDF5 datasets are randomly indexable, so
-# chunks are sliced directly from disk instead of buffered in memory.
+# g3 ingestion paths stream through this to turn variable-length frames into fixed-duration Chunks. The h5 simulation path doesn't use it -- HDF5 datasets are randomly indexable, so chunks are sliced directly from disk instead of buffered in memory.
 
 # ============================================================================ #
 # _rechunk
@@ -307,9 +299,6 @@ def _precalcChunkTotal(cfg):
 
     if cfg["data"]["format"] != "lab":
         return {"total_chunks": None}
-
-    # if cfg["data"]["format"] != "blasttng":
-    #     return {"total_chunks": None}
 
     files = []
     file_format = cfg["data"]["file_format"]
@@ -579,6 +568,7 @@ def _iter_h5_simulation_chunks(files: list, chunk_duration_s: float, apply_offse
     rather than being spliced onto the next file's head, since HDF5 files
     aren't guaranteed contiguous in time the way consecutive g3 frames are.
     """
+
     det_names       = None
     det_dirs        = None
     sample_rate_ref = [None]
@@ -633,264 +623,6 @@ def _iter_h5_simulation_chunks(files: list, chunk_duration_s: float, apply_offse
 
 
 # ============================================================================ #
-# BLAST-TNG FORMAT
-# ============================================================================ #
-
-
-# ============================================================================ #
-# _interp_to_length
-def _interp_to_length(a: np.ndarray, n_new: int) -> np.ndarray:
-    """
-    Index-based linear interpolation, stretching/compressing `a` to `n_new`
-    samples.
-
-    Pointing telemetry and KID readout are commonly sampled at different
-    native rates within the same frame (confirmed on real BLAST-TNG data:
-    ra/dec at 1428 samples/frame vs I/Q at 1510). This assumes both span the
-    same real time range uniformly within the frame same convention as
-    the original notebook's alignMasterAndRoachTods.
-    """
-    if len(a) == n_new:
-        return a
-    x_old = np.arange(len(a))
-    x_new = np.linspace(0, len(a) - 1, n_new)
-    return np.interp(x_new, x_old, a)
-
-
-# ============================================================================ #
-# _load_blasttng_calibration
-def _load_blasttng_calibration(frame, target_sweeps_key: str = "target_sweeps"):
-    """
-    Extract detector names and calibration sweep data from a calibration frame.
-
-    Target sweeps are stored as a G3TimestreamMap with keys "<kid>_I",
-    "<kid>_Q", "<kid>_F" for each detector's calibration sweep -- same
-    convention as external/blasttng-to-g3's g3_utils/signal.py.
-
-    Also reads pre-baked per-detector "ra_shifts"/"dec_shifts" from the
-    calibration frame which were done by Jonah, if present (as written by g3_packager, see
-    external/blasttng-to-g3/g3_packager/frame_generators.py's
-    get_kid_shifts, sourced from a one-off empirical shift table).
-
-    NOTE : These
-    aren't guaranteed to exist for every dataset; callers should fall back
-    to computing shifts themselves (e.g. via the per-detector pass) when
-    baked_shifts comes back None.
-    """
-    target_sweeps_map = frame[target_sweeps_key]
-    kids = sorted({name[:-2] for name in target_sweeps_map.keys()})
-
-    target_sweeps = {}
-    for kid in kids:
-        If = np.array(target_sweeps_map[f"{kid}_I"])
-        Qf = np.array(target_sweeps_map[f"{kid}_Q"])
-        Ff = np.array(target_sweeps_map[f"{kid}_F"])
-        target_sweeps[kid] = (If, Qf, Ff)
-
-    baked_shifts = None
-    if "ra_shifts" in frame and "dec_shifts" in frame:
-        ra_shifts_map  = frame["ra_shifts"]
-        dec_shifts_map = frame["dec_shifts"]
-        baked_shifts = {
-            kid: (ra_shifts_map[kid] / core.G3Units.deg, dec_shifts_map[kid] / core.G3Units.deg)
-            for kid in kids if kid in ra_shifts_map and kid in dec_shifts_map
-        }
-
-    return kids, target_sweeps, baked_shifts
-
-
-# ============================================================================ #
-# get_blasttng_baked_shifts
-def get_blasttng_baked_shifts(cfg: dict) -> Optional[dict]:
-    """
-    Peek at the first blasttng .g3 file's calibration frame for pre-baked
-    per-detector ra_shifts/dec_shifts, without iterating the whole file.
-    """
-    if cfg["data"]["format"] != "blasttng":
-        return None
-
-    files = []
-    for pattern in cfg["data"]["input_dirs"]:
-        for d in sorted(glob.glob(pattern)):
-            files.extend(sorted(pathlib.Path(d).rglob("*.g3")))
-    if not files:
-        return None
-
-    for frame in core.G3File(str(files[0])):
-        if frame.type == core.G3FrameType.Calibration:
-            _, _, baked_shifts = _load_blasttng_calibration(frame)
-            return baked_shifts
-    return None
-
-
-# ============================================================================ #
-# get_blasttng_site
-def get_blasttng_site(cfg: dict):
-    """
-    Peek at the first blasttng .g3 file's first scan frame for the gondola's
-    lat/lon/alt telemetry (same keys blasttng-to-g3's coords.add_radec_so3g
-    reads), and return the middle-of-frame position as an astropy
-    EarthLocation. Returns None if no lat/lon/alt telemetry is present.
-    """
-    if cfg["data"]["format"] != "blasttng":
-        return None
-
-    from astropy.coordinates import EarthLocation
-    import astropy.units as u
-
-    files = []
-    for pattern in cfg["data"]["input_dirs"]:
-        for d in sorted(glob.glob(pattern)):
-            files.extend(sorted(pathlib.Path(d).rglob("*.g3")))
-    if not files:
-        return None
-
-    for frame in core.G3File(str(files[0])):
-        if frame.type == core.G3FrameType.Scan and all(k in frame for k in ("lat", "lon", "alt")):
-            mid     = len(frame["lat"]) // 2
-            lat_deg = frame["lat"][mid] / core.G3Units.deg
-            lon_deg = frame["lon"][mid] / core.G3Units.deg
-            alt_m   = frame["alt"][mid] / core.G3Units.m
-            return EarthLocation(lat=lat_deg * u.deg, lon=lon_deg * u.deg, height=alt_m * u.m)
-    return None
-
-
-# ============================================================================ #
-# _load_blasttng_cal_lamp_df
-def _load_blasttng_cal_lamp_df(
-        frame, kids, target_sweeps, iq_key: str = "cal_lamp_data",df_method: str = "hybrid", threshold_frac: float = 0.05, probe_medians: Optional[dict] = None):
-    """
-    Compute each detector's df timestream during the calibration-lamp
-    exposure, for use as the reference in signal.normalize_tod.
-    """
-    if iq_key not in frame:
-        return None
-
-    super_ts = frame[iq_key]
-    names    = np.asarray(super_ts.names)
-
-    cal_lamp_df = {}
-    for kid in kids:
-        i_matches = np.where(names == f"{kid}_I")[0]
-        q_matches = np.where(names == f"{kid}_Q")[0]
-        if len(i_matches) == 0 or len(q_matches) == 0:
-            continue
-        I = np.asarray(super_ts.data[i_matches[0]], dtype=float)
-        Q = np.asarray(super_ts.data[q_matches[0]], dtype=float)
-        If, Qf, Ff = target_sweeps[kid]
-        
-        f_tone = probe_medians.get(kid) if probe_medians is not None else None
-
-        if df_method == "hybrid":
-            df, _ = tod.iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone)
-        elif df_method == "gradient":
-            df = tod.iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone)
-        else:
-            df = tod.iq_to_df_angle(I, Q, If, Qf, Ff, f_tone)
-        cal_lamp_df[kid] = np.nan_to_num(df, nan=0.0)
-
-    return cal_lamp_df
-
-
-# ============================================================================ #
-# _blasttng_scan_to_chunk
-def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
-                            iq_key: str = "data", df_method: str = "hybrid",
-                            threshold_frac: float = 0.05, cal_lamp_df: dict = None,
-                            probe_medians: Optional[dict] = None):
-    """
-    Convert one real-data scan frame into a frame-level Chunk.
-    """
-    super_ts = frame[iq_key]
-    names    = np.asarray(super_ts.names)
-    n_dets   = len(kids)
-    n_samps  = super_ts.data.shape[1]
-
-    sig = np.zeros((n_samps, n_dets), dtype=float)
-
-    for i, kid in enumerate(kids):
-        i_idx = int(np.where(names == f"{kid}_I")[0][0])
-        q_idx = int(np.where(names == f"{kid}_Q")[0][0])
-        I = np.asarray(super_ts.data[i_idx], dtype=float)
-        Q = np.asarray(super_ts.data[q_idx], dtype=float)
-        If, Qf, Ff = target_sweeps[kid]
-
-        f_tone = probe_medians.get(kid) if probe_medians is not None else None
-
-        if df_method == "hybrid":
-            df, _ = tod.iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone)
-        elif df_method == "gradient":
-            df = tod.iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone)
-        else:
-            df = tod.iq_to_df_angle(I, Q, If, Qf, Ff, f_tone)
-        sig[:, i] = df
-
-    sig = np.nan_to_num(sig, nan=0.0)
-
-    if cal_lamp_df is not None:
-        for i, kid in enumerate(kids):
-            if kid in cal_lamp_df:
-                sig[:, i] = tod.normalize_tod(sig[:, i], cal_lamp_df[kid])
-
-    ra_bore  = np.array(frame["ra"])  / core.G3Units.deg
-    dec_bore = np.array(frame["dec"]) / core.G3Units.deg
-    ra_bore  = _interp_to_length(ra_bore, n_samps)
-    dec_bore = _interp_to_length(dec_bore, n_samps)
-
-    t_start = super_ts.times[0].time  / core.G3Units.s
-    t_stop  = super_ts.times[-1].time / core.G3Units.s
-
-    if sample_rate_ref[0] is None:
-        sample_rate_ref[0] = n_samps / (t_stop - t_start)
-
-    flags = np.zeros((n_samps, n_dets), dtype=int)
-
-    return Chunk(
-        kids=kids, signal=sig, common_mode=None,
-        ra=None, dec=None,
-        ra_bore=ra_bore, dec_bore=dec_bore,
-        boresight_q=None, det_dirs=None,
-        t_start=t_start, t_stop=t_stop,
-        sample_rate=sample_rate_ref[0], flags=flags,
-        chunk_index=-1,
-    )
-
-
-# ============================================================================ #
-# _iter_blasttng_chunks
-def _iter_blasttng_chunks(
-        files:list, iq_key:str="data", target_sweeps_key:str="target_sweeps",
-        cal_lamp_key:str="cal_lamp_data", df_method:str="hybrid", threshold_frac:float = 0.05, probe_medians=None) -> Iterator[Chunk]:
-    """Yield one frame-level Chunk per scan frame from real BLAST-TNG-format .g3 files."""
-    kids = None
-    target_sweeps = None
-    cal_lamp_df = None
-    sample_rate_ref = [None]
-
-    for path in files:
-        for frame in core.G3File(str(path)):
-            if frame.type == core.G3FrameType.Calibration:
-                kids, target_sweeps, _baked_shifts = _load_blasttng_calibration(frame, target_sweeps_key)
-                cal_lamp_df = _load_blasttng_cal_lamp_df(
-                    frame, kids, target_sweeps, iq_key=cal_lamp_key,
-                    df_method=df_method, threshold_frac=threshold_frac, probe_medians=probe_medians
-                )
-            elif frame.type == core.G3FrameType.Scan:
-                if kids is None:
-                    raise RuntimeError(
-                        "Scan frame encountered before calibration frame. "
-                        "Check that the first .g3 file contains a calibration frame."
-                    )
-                yield _blasttng_scan_to_chunk(
-                    frame, kids, target_sweeps, sample_rate_ref,
-                    iq_key=iq_key, df_method=df_method, threshold_frac=threshold_frac,
-                    cal_lamp_df=cal_lamp_df, probe_medians=probe_medians
-                )
-
-
-
-
-# ============================================================================ #
 # API
 # ============================================================================ #
 
@@ -918,38 +650,19 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
 
     if fmt == "lab":
         chunked_iter = _iter_h5_lab_chunks(files, chunk_duration_s, apply_offsets)
+
     elif fmt == "simulation" and file_fmt == "h5":
         # HDF5 datasets support direct index slicing, so chunks are read
         # straight off disk -- no frame buffering/_rechunk needed here.
         chunked_iter = _iter_h5_simulation_chunks(files, chunk_duration_s, apply_offsets)
+
     elif fmt == "simulation":
         frame_iter = _iter_g3_simulation_chunks(files, apply_offsets)
         chunked_iter = _rechunk(frame_iter, chunk_duration_s)
-    elif fmt == "blasttng":
-        blasttng_cfg = cfg.get("blasttng", {})
-        
-        out_dir = cfg.get("output", {}).get("output_dir", None)
-        probe_medians = None
-        if out_dir:
-            probe_file = pathlib.Path(out_dir) / "blasttng_probe_medians.npz"
-            if probe_file.exists():
-                with np.load(probe_file) as data:
-                    probe_medians = dict(zip(data["kids"], data["medians"]))
-
-        frame_iter = _iter_blasttng_chunks(
-            files,
-            iq_key=blasttng_cfg.get("iq_key", "data"),
-            target_sweeps_key=blasttng_cfg.get("target_sweeps_key", "target_sweeps"),
-            cal_lamp_key=blasttng_cfg.get("cal_lamp_key", "cal_lamp_data"),
-            df_method=blasttng_cfg.get("df_method", "hybrid"),
-            threshold_frac=blasttng_cfg.get("threshold_frac", 0.05),
-            probe_medians=probe_medians,
-        )
-        chunked_iter = _rechunk(frame_iter, chunk_duration_s)
+    
     else:
         raise NotImplementedError(
             f"Data format '{fmt}' is not yet implemented. "
-            f"Currently supported: 'simulation', 'blasttng'."
         )
 
     t_obs_start = None

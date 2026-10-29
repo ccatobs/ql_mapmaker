@@ -12,28 +12,8 @@ input_dirs = ["/home/player1/map_making_vlad/sample_h5"]
 # "g3", "h5"
 file_format = "h5"
 
-# "blasttng", "simulation", "lab"
+# "simulation", "lab"
 format = "lab" 
-
-
-# ============================================================================ #
-# blasttng
-# Only used when [data] format == "blasttng".
-[blasttng] # TODO: remove this section
-
-# G3SuperTimestream key for raw I/Q in scan frames
-iq_key = "data" # TODO: move to hardcoded
-
-# G3TimestreamMap key for calibration sweeps in the calibration frame
-target_sweeps_key = "target_sweeps" # TODO: move to hardcoded
-
-# G3SuperTimestream key for the cal-lamp I/Q exposure in the calibration frame, used to normalize each detector (see signal.normalize_tod). If absent, signal is left unnormalized rather than failing.
-cal_lamp_key = "cal_lamp_data" # TODO: move to hardcoded
-
-df_method = "hybrid" # TODO: remove
-
-# iq_to_df_hybrid: fraction of sweep bandwidth beyond which fallback triggers
-threshold_frac = 0.05 # TODO: remove / replace
 
 
 # ============================================================================ #
@@ -48,8 +28,7 @@ dec0_deg = -56.649
 
 # Alternative to manual ra0_deg/dec0_deg: resolve the centre from a name. Ignored while ra0_deg/dec0_deg above are both set, comment those out to use this.
 # - Solar-system bodies ("jupiter", "saturn", "moon", "sun", ...) move, so they're looked up via ephemeris at the observation's start time from an observer site so FYST for simulation, or the gondola's own lat/lon/alt telemetry for real BLAST-TNG data (a balloon flight has no fixed site). Useful since planets are used as calibration sources.
-# - Anything else is resolved by name via SkyCoord.from_name (SIMBAD, requires network access), e.g. "RCW 92" same as in Jonah's code external/map_making_blasttng_jl/map_maker_iterative uses.
-#target = "Jupiter"
+# - Anything else is resolved by name via SkyCoord.from_name (SIMBAD, requires network access).
 
 # Map extent
 xlen_deg   = 2.5 # deg
@@ -105,24 +84,16 @@ clean_steps = ["highpass"]
 # ---------------------------------------------------------------- #
 #   Detector exclusion
 
-# auto_exclude_threshold: flag detectors with std > N * median std across all detectors.
+# Std away from all detectors median.
 # Set to 0 to disable auto-exclusion.
-auto_exclude_threshold = 0
-# Jonah's known-bad roach1 KID list from blasttng-to-g3/profiling/mapmaker.py
-# (kid_rejects, converted to names via ut.kid_string(id, roach_id=1)) -- named
-# rather than indexed, since list-position in our kid list isn't guaranteed to
-# match the raw KID number if any channels are missing from the calibration data.
+auto_exclude_threshold = 0 
+
 #exclude_detectors = ["roach1_0011", "roach1_0127"]
 #exclude_detector_indices = [1, 2]
 
-# wnf_exclude_sigma: additional automatic exclusion based on each detector's
-# white-noise-floor (median PSD in a 0.4-0.9x Nyquist band). Cutoff is
-# log-median + N*sigma of log10(white_noise_floor), NOT a linear N*median --
-# this metric is extremely heavy-tailed (75th percentile can already be ~7x
-# the median), so a linear cutoff excludes an arbitrary large fraction of the
-# array instead of catching real outliers. See blasttng_flagging_
-# characterization.ipynb Section 8, and Chapin et al. 2013 (SCUBA-2/SMURF)
-# Section 3.1.6 for the same technique applied to bolometer white noise.
+# Additional automatic exclusion based on each detector's white-noise-floor 
+# median PSD in a 0.4-0.9x Nyquist band. 
+# Cutoff is log-median + N*sigma of log10(white_noise_floor).
 # Set to 0 to disable.
 wnf_exclude_sigma = 3.0
 

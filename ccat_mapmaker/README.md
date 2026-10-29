@@ -48,14 +48,12 @@ Open `ccat_mapmaker/config.toml` and set `input_dirs` to the directory containin
 [data]
 input_dirs  = ["/path/to/your/data"]
 file_format = "g3"            # or "h5"
-format      = "simulation"    # or "blasttng" for real BLAST-TNG data
+format      = "simulation"    # or "lab"
 ```
 
 `input_dirs` accepts glob patterns and is expanded recursively for files matching `file_format`.
 
 `file_format` and `format` are independent: `file_format` says what kind of file to look for on disk, `format` says how to interpret its contents. TOAST simulations can be either `.g3` or `.h5`; real BLAST-TNG data is always `.g3`.
-
-If `format = "blasttng"`, also fill in the `[blasttng]` section with the G3 keys for the raw I/Q data, calibration sweeps, and (optionally) a cal-lamp exposure used to normalize each detector before it's converted to a frequency shift.
 
 ### 2. Set the map centre and size (optional)
 
@@ -141,7 +139,7 @@ All settings live in `config.toml`. The most commonly changed ones:
 |---|---|---|
 | `input_dirs` | `[data]` | Paths to data files (glob patterns OK) |
 | `file_format` | `[data]` | `"g3"` or `"h5"` |
-| `format` | `[data]` | `"simulation"` or `"blasttng"` |
+| `format` | `[data]` | `"simulation"` or `"lab"` |
 | `ra0_deg`, `dec0_deg`, `target` | `[map]` | Map centre (omit all three to auto-detect) |
 | `res_arcmin` | `[map]` | Pixel size in arcminutes |
 | `n_iterations` | `[pipeline]` | Common-mode subtraction iterations (3-5 is typical) |

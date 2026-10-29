@@ -121,35 +121,8 @@ def _precalcChunkTotal(cfg):
 
     if cfg["data"]["format"] == "lab":
 
-        # Create a lightweight generator that simulates exactly what iter_chunks does, 
-        # but only yields empty/lightweight objects or counts them via _rechunk
-        chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
-        start_offset_s   = cfg["pipeline"].get("start_offset_s", 0.0)
-        max_duration_s   = cfg["pipeline"].get("max_duration_s", None)
-
-        # Gather files the exact same way iter_chunks does
-        files = []
-        file_fmt = cfg["data"]["file_format"]
-        for pattern in cfg["data"]["input_dirs"]:
-            for d in sorted(glob.glob(pattern)):
-                files.extend(sorted(pathlib.Path(d).rglob(f"*.{file_fmt}")))
-
-        # Feed reader's internal lab frame iterator directly into _rechunk
-        frame_iter = reader._iter_h5_lab_frames(files, apply_offsets=False)
-        chunked_iter = reader._rechunk(frame_iter, chunk_duration_s)
-
-        # Quickly count chunks while respecting start_offset_s and max_duration_s filters
-        total_chunks = 0
-        t_obs_start = None
-        for chunk in chunked_iter:
-            if t_obs_start is None:
-                t_obs_start = chunk.t_start
-            elapsed = chunk.t_stop - t_obs_start
-            if elapsed <= start_offset_s:
-                continue
-            if max_duration_s is not None and (chunk.t_start - t_obs_start) >= start_offset_s + max_duration_s:
-                break
-            total_chunks += 1
+        # TODO: how to find total_chunks?
+        total_chunks = 1000
 
         return {
             'total_chunks': total_chunks

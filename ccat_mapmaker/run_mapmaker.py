@@ -1026,11 +1026,7 @@ def main():
     args = _setupArgParser()
     prof = _setupProfiler(args)
     cfgs = _loadConfiguration(args.config)
-
-    # TODO: 
-    t0 = time.perf_counter()
     cfgs |= reader._precalcChunkTotal(cfgs) # if possible
-    print(f"Time to find total chunks: {time.perf_counter() - t0}")
 
     # step_0_probe_medians(cfgs) # only used for BLAST-TNG. Very slow.
 

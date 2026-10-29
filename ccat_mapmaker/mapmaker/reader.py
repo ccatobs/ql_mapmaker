@@ -53,8 +53,8 @@ import h5py
 from dataclasses import dataclass
 from spt3g import core # type: ignore
 
-from mapmaker.coord import precompute_det_directions, boresight_to_radec, det_radec_from_boresight
-from mapmaker.tod import iq_to_df_angle, iq_to_df_gradient, iq_to_df_hybrid, normalize_tod
+import coord
+import tod
 
 
 # ============================================================================ #
@@ -341,7 +341,7 @@ def _load_g3_focalplane(frame):
         det_names = [n.decode("utf-8") for n in f["focalplane"]["name"][:]]
         quats     = f["focalplane"]["quat"][:]
     det_quats = {name: quat for name, quat in zip(det_names, quats)}
-    dirs      = precompute_det_directions(quats)  # (n_dets, 3), computed once
+    dirs      = coord.precompute_det_directions(quats)  # (n_dets, 3), computed once
     det_dirs  = {name: dirs[i] for i, name in enumerate(det_names)}
     return det_names, det_quats, det_dirs
 
@@ -369,7 +369,7 @@ def _g3_simulation_scan_to_chunk(frame, det_names, det_dirs, sample_rate_ref, ap
     det_ra  = np.zeros((n_samps, n_dets), dtype=float) if apply_offsets else None
     det_dec = np.zeros((n_samps, n_dets), dtype=float) if apply_offsets else None
 
-    ra_bore, dec_bore, boresight_r = boresight_to_radec(boresight_q)
+    ra_bore, dec_bore, boresight_r = coord.boresight_to_radec(boresight_q)
     boresight_q_scipy = boresight_q[:, [1, 2, 3, 0]]  # reorder w,x,y,z -> x,y,z,w (scipy)
 
     for i, kid in enumerate(kids):
@@ -382,7 +382,7 @@ def _g3_simulation_scan_to_chunk(frame, det_names, det_dirs, sample_rate_ref, ap
             sig[:, i] = y_raw
 
         if apply_offsets:
-            det_ra[:, i], det_dec[:, i] = det_radec_from_boresight(boresight_r, det_dirs[kid])
+            det_ra[:, i], det_dec[:, i] = coord.det_radec_from_boresight(boresight_r, det_dirs[kid])
 
     ts      = raw[kids[0]]
     t_start = ts.start.time / core.G3Units.s
@@ -451,7 +451,7 @@ def _load_h5_focalplane(path):
         det_names = h5_file['instrument/focalplane']['name'].astype(str)
         quats     = h5_file['instrument/focalplane']['quat']
     det_quats = {name: quat for name, quat in zip(det_names, quats)}
-    dirs      = precompute_det_directions(quats)  # (n_dets, 3), computed once
+    dirs      = coord.precompute_det_directions(quats)  # (n_dets, 3), computed once
     det_dirs  = {name: dirs[i] for i, name in enumerate(det_names)}
     return det_names, det_quats, det_dirs
 
@@ -493,7 +493,7 @@ def _iter_h5_simulation_chunks(files: list, chunk_duration_s: float, apply_offse
             n_samps  = len(times)
 
             boresight_q = np.roll(np.asarray(h5_file["shared/boresight_radec"]), 1)  # raw (w,x,y,z), shape (n,4)
-            ra_bore, dec_bore, boresight_r = boresight_to_radec(boresight_q)
+            ra_bore, dec_bore, boresight_r = coord.boresight_to_radec(boresight_q)
 
             if sample_rate_ref[0] is None:
                 sample_rate_ref[0] = n_samps / (times[-1] - times[0])
@@ -511,7 +511,7 @@ def _iter_h5_simulation_chunks(files: list, chunk_duration_s: float, apply_offse
                     det_ra  = np.zeros((stop - start, len(det_names)), dtype=float)
                     det_dec = np.zeros((stop - start, len(det_names)), dtype=float)
                     for i, kid in enumerate(det_names):
-                        det_ra[:, i], det_dec[:, i] = det_radec_from_boresight(
+                        det_ra[:, i], det_dec[:, i] = coord.det_radec_from_boresight(
                             boresight_r[start:stop], det_dirs[kid]
                         )
 
@@ -680,11 +680,11 @@ def _load_blasttng_cal_lamp_df(
         f_tone = probe_medians.get(kid) if probe_medians is not None else None
 
         if df_method == "hybrid":
-            df, _ = iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone)
+            df, _ = tod.iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone)
         elif df_method == "gradient":
-            df = iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone)
+            df = tod.iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone)
         else:
-            df = iq_to_df_angle(I, Q, If, Qf, Ff, f_tone)
+            df = tod.iq_to_df_angle(I, Q, If, Qf, Ff, f_tone)
         cal_lamp_df[kid] = np.nan_to_num(df, nan=0.0)
 
     return cal_lamp_df
@@ -716,11 +716,11 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
         f_tone = probe_medians.get(kid) if probe_medians is not None else None
 
         if df_method == "hybrid":
-            df, _ = iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone)
+            df, _ = tod.iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone)
         elif df_method == "gradient":
-            df = iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone)
+            df = tod.iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone)
         else:
-            df = iq_to_df_angle(I, Q, If, Qf, Ff, f_tone)
+            df = tod.iq_to_df_angle(I, Q, If, Qf, Ff, f_tone)
         sig[:, i] = df
 
     sig = np.nan_to_num(sig, nan=0.0)
@@ -728,7 +728,7 @@ def _blasttng_scan_to_chunk(frame, kids, target_sweeps, sample_rate_ref,
     if cal_lamp_df is not None:
         for i, kid in enumerate(kids):
             if kid in cal_lamp_df:
-                sig[:, i] = normalize_tod(sig[:, i], cal_lamp_df[kid])
+                sig[:, i] = tod.normalize_tod(sig[:, i], cal_lamp_df[kid])
 
     ra_bore  = np.array(frame["ra"])  / core.G3Units.deg
     dec_bore = np.array(frame["dec"]) / core.G3Units.deg

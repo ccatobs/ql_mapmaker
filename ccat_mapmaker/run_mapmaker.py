@@ -90,11 +90,7 @@ def _setupArgParser():
     parser.add_argument("--profile", action="store_true", help="Print timing bottlenecks on exit")
     args = parser.parse_args()
 
-    profiler = cProfile.Profile()
-    if args.profile:
-        profiler.enable()
-
-    return args, profiler
+    return args
 
 
 # ============================================================================ #

@@ -1058,7 +1058,7 @@ def main():
     cfgs = _loadConfiguration(args.config)
 
     t0 = time.perf_counter()
-    cfgs |= _precalcChunkTotal() # if possible
+    cfgs |= _precalcChunkTotal(cfgs) # if possible
     print(f"Time to find total chunks: {time.perf_counter() - t0}")
 
     # step_0_probe_medians(cfgs) # only used for BLAST-TNG. Very slow.

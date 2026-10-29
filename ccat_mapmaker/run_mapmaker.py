@@ -23,6 +23,7 @@
 
 import os
 import io
+import sys
 import time
 import pstats
 import pathlib
@@ -165,6 +166,21 @@ def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
 
 
 # ============================================================================ #
+# printLoadingBar
+def printLoadingBar(iteration, total, length=40):
+    """
+    """
+
+    percent = (iteration / total) * 100
+    filled_length = int(length * iteration // total)
+    bar = '█' * filled_length + '-' * (length - filled_length)
+    sys.stdout.write(f'\r|{bar}| {percent:.1f}% Complete')
+    sys.stdout.flush()
+    if iteration == total:
+        print()  # Move to new line on completion
+
+
+# ============================================================================ #
 # _firstPass
 def _firstPass(cfg: dict):
     """Streaming loop over all data chunks to compute:
@@ -175,7 +191,9 @@ def _firstPass(cfg: dict):
 
     # Stream through chunks of time-ordered data (TOD)
     init = False
-    for chunk in reader.iter_chunks(cfg): # chunk_id=chunk.chunk_index
+    for i,chunk in enumerate(reader.iter_chunks(cfg)): # chunk_id=chunk.chunk_index
+
+        printLoadingBar(i, chunk.signal.shape[0], length=40)
 
         # Skip chunks where all detector data is flagged out
         if np.all(chunk.flags != 0):

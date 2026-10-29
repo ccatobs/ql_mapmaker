@@ -998,7 +998,7 @@ def main():
     t_total = time.perf_counter()
 
     args = _setupArgParser()
-    prof = _setupProfiler()
+    prof = _setupProfiler(args)
     cfgs = _loadConfiguration(args.config)
 
     step_0_probe_medians(cfgs) # only used for BLAST-TNG. Very slow.

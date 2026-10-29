@@ -117,22 +117,77 @@ def _precalcChunkTotal(cfg):
     """
     """
 
-    total_chunks = 0
-    chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
+    if cfg["data"]["format"] == "lab":
+        
+        total_chunks = 0
+        file_fmt = cfg["data"]["file_format"]
+        chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
 
-    if cfg["data"]["file_format"] == "h5":
+        files = []
         for pattern in cfg["data"]["input_dirs"]:
             for d in sorted(glob.glob(pattern)):
-                for path in sorted(pathlib.Path(d).rglob("*.h5")):
-                    with h5py.File(path, 'r') as f:
-                        n_samps = f["shared/times"].shape[0]
-                        # Approximate sample rate from first/last time or metadata if available, 
-                        # or derive chunk_n directly:
-                        # (Alternatively, query sample_rate from the file if stored, or inspect times[1] - times[0])
-                        dt = f["shared/times"][1] - f["shared/times"][0]
-                        sample_rate = 1.0 / dt if dt > 0 else 400.0 # adjust default if needed
-                        chunk_n = max(1, int(chunk_duration_s * sample_rate))
-                        total_chunks += math.ceil(n_samps / chunk_n)
+                files.extend(sorted(pathlib.Path(d).rglob(f"*.{file_fmt}")))
+
+        sample_rate_ref = None
+        
+        for path in files:
+            with h5py.File(path, 'r') as f:
+                if "timestream" not in f:
+                    continue
+                timestream_grp = f["timestream"]
+                blocks = list(timestream_grp.keys())
+                if not blocks:
+                    continue
+
+                first_block = blocks[0]
+                if "frames" not in timestream_grp[first_block]:
+                    continue
+                frames_grp = timestream_grp[first_block]["frames"]
+                frame_keys = sorted([k for k in frames_grp.keys() if k.isdigit()], key=int)
+
+                for fk in frame_keys:
+                    sample_block = frames_grp[fk]
+                    frame_type = sample_block.attrs.get("frame_type", b"")
+                    if isinstance(frame_type, bytes):
+                        frame_type = frame_type.decode("utf-8")
+
+                    if frame_type != "Scan":
+                        continue
+
+                    min_samps = None
+                    reference_times = None
+
+                    for block in blocks:
+                        block_frame_path = f"timestream/{block}/frames/{fk}"
+                        if block_frame_path not in f:
+                            continue
+                        b_frame = f[block_frame_path]
+                        
+                        if "data" not in b_frame or "times" not in b_frame["data"]:
+                            continue
+
+                        times_ds = b_frame["data"]["times"][:]
+                        n_samps = len(times_ds)
+                        if min_samps is None or n_samps < min_samps:
+                            min_samps = n_samps
+                        if reference_times is None:
+                            reference_times = times_ds
+
+                    if not min_samps or min_samps == 0:
+                        continue
+
+                    # Estimate sample rate from first frame if not already found
+                    if sample_rate_ref is None and reference_times is not None:
+                        t_start = reference_times[0] / 1.0 # core.G3Units.s equivalent if needed
+                        t_stop = reference_times[-1] / 1.0
+                        if t_stop > t_start:
+                            sample_rate_ref = min_samps / (t_stop - t_start)
+                    
+                    sample_rate = sample_rate_ref if sample_rate_ref is not None else 1.0
+                    chunk_n = max(1, int(chunk_duration_s * sample_rate)) if chunk_duration_s > 0 else min_samps
+                    
+                    # Each lab frame gets re-chunked, so add the chunks produced by this frame
+                    total_chunks += math.ceil(min_samps / chunk_n)
 
         return {
             'total_chunks': total_chunks
@@ -1057,6 +1112,7 @@ def main():
     prof = _setupProfiler(args)
     cfgs = _loadConfiguration(args.config)
 
+    # TODO: 
     t0 = time.perf_counter()
     cfgs |= _precalcChunkTotal(cfgs) # if possible
     print(f"Time to find total chunks: {time.perf_counter() - t0}")

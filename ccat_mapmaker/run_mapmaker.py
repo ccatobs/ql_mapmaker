@@ -24,7 +24,10 @@
 import os
 import io
 import sys
+import h5py
+import math
 import time
+import glob
 import pstats
 import pathlib
 import argparse
@@ -106,6 +109,36 @@ def _setupProfiler(args):
         profiler.enable()
         
     return profiler
+
+
+# ============================================================================ #
+# _precalcChunkTotal
+def _precalcChunkTotal(cfg):
+    """
+    """
+
+    total_chunks = 0
+    chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
+
+    if cfg["data"]["file_format"] == "h5":
+        for pattern in cfg["data"]["input_dirs"]:
+            for d in sorted(glob.glob(pattern)):
+                for path in sorted(pathlib.Path(d).rglob("*.h5")):
+                    with h5py.File(path, 'r') as f:
+                        n_samps = f["shared/times"].shape[0]
+                        # Approximate sample rate from first/last time or metadata if available, 
+                        # or derive chunk_n directly:
+                        # (Alternatively, query sample_rate from the file if stored, or inspect times[1] - times[0])
+                        dt = f["shared/times"][1] - f["shared/times"][0]
+                        sample_rate = 1.0 / dt if dt > 0 else 400.0 # adjust default if needed
+                        chunk_n = max(1, int(chunk_duration_s * sample_rate))
+                        total_chunks += math.ceil(n_samps / chunk_n)
+
+        return {
+            'total_chunks': total_chunks
+        }
+
+    return None
 
 
 # ============================================================================ #
@@ -197,16 +230,12 @@ def _firstPass(cfg: dict):
     - Average Power Spectral Density (PSD) and white noise floor characteristics
     """
 
-    # Find chunk count
-    t0 = time.perf_counter()
-    total_chunks = sum(1 for _ in reader.iter_chunks(cfg))
-    print(f"Time to find total chunks: {time.perf_counter() - t0}")
-
     # Stream through chunks of time-ordered data (TOD)
     init = False
     for i,chunk in enumerate(reader.iter_chunks(cfg)): # chunk_id=chunk.chunk_index
 
-        _printLoadingBar(i, chunk.signal.shape[0], length=40)
+        if cfg['total_chunks'] is not None:
+            _printLoadingBar(i, cfg['total_chunks'], length=40)
 
         # Skip chunks where all detector data is flagged out
         if np.all(chunk.flags != 0):
@@ -1027,6 +1056,10 @@ def main():
     args = _setupArgParser()
     prof = _setupProfiler(args)
     cfgs = _loadConfiguration(args.config)
+
+    t0 = time.perf_counter()
+    cfgs |= _precalcChunkTotal() # if possible
+    print(f"Time to find total chunks: {time.perf_counter() - t0}")
 
     # step_0_probe_medians(cfgs) # only used for BLAST-TNG. Very slow.
 

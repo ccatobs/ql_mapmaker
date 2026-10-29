@@ -997,7 +997,7 @@ def main():
     prof = _setupProfiler(args)
     cfgs = _loadConfiguration(args.config)
 
-    step_0_probe_medians(cfgs) # only used for BLAST-TNG. Very slow.
+    # step_0_probe_medians(cfgs) # only used for BLAST-TNG. Very slow.
 
     state_1 = _step1(cfgs)
 

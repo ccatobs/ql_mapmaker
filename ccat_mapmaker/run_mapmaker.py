@@ -108,6 +108,29 @@ def _setupProfiler(args):
     return profiler
 
 
+# ============================================================================ #
+# _printLoadingBar
+def _printLoadingBar(iteration, total, length=40):
+    """Prints an in-place updating loading bar to stdout, clearing the line upon completion.
+
+    Args:
+        iteration (int): Current step or iteration index.
+        total (int): Total number of iterations for completion.
+        length (int, optional): Character length of the progress bar. Defaults to 40.
+    """
+
+    if iteration < total:
+        percent = (iteration / total) * 100
+        filled_length = int(length * iteration // total)
+        bar = '█' * filled_length + '-' * (length - filled_length)
+        sys.stdout.write(f'\r|{bar}| {percent:.1f}% Complete')
+        sys.stdout.flush()
+    else:
+        line_width = length + 18
+        sys.stdout.write(f'\r{" " * line_width}\r')
+        sys.stdout.flush()
+
+
 
 
 # ============================================================================ #
@@ -166,21 +189,6 @@ def _compute_blasttng_probe_medians(cfg: dict, out_dir: str) -> dict:
 
 
 # ============================================================================ #
-# printLoadingBar
-def printLoadingBar(iteration, total, length=40):
-    """
-    """
-
-    percent = (iteration / total) * 100
-    filled_length = int(length * iteration // total)
-    bar = '█' * filled_length + '-' * (length - filled_length)
-    sys.stdout.write(f'\r|{bar}| {percent:.1f}% Complete')
-    sys.stdout.flush()
-    if iteration == total:
-        print()  # Move to new line on completion
-
-
-# ============================================================================ #
 # _firstPass
 def _firstPass(cfg: dict):
     """Streaming loop over all data chunks to compute:
@@ -189,11 +197,16 @@ def _firstPass(cfg: dict):
     - Average Power Spectral Density (PSD) and white noise floor characteristics
     """
 
+    # Find chunk count
+    t0 = time.perf_counter()
+    total_chunks = sum(1 for _ in reader.iter_chunks(cfg))
+    print(f"Time to find total chunks: {time.perf_counter() - t0}")
+
     # Stream through chunks of time-ordered data (TOD)
     init = False
     for i,chunk in enumerate(reader.iter_chunks(cfg)): # chunk_id=chunk.chunk_index
 
-        printLoadingBar(i, chunk.signal.shape[0], length=40)
+        _printLoadingBar(i, chunk.signal.shape[0], length=40)
 
         # Skip chunks where all detector data is flagged out
         if np.all(chunk.flags != 0):

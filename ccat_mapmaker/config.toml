@@ -10,10 +10,10 @@
 input_dirs = ["/home/player1/map_making_audrey/roach1_data"]
 
 # "g3", "h5"
-file_format = "g3" 
+file_format = "h5"
 
 # "blasttng", "simulation", "lab"
-format = "blasttng" 
+format = "lab" 
 
 
 # ============================================================================ #

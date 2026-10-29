@@ -323,7 +323,7 @@ def _step1(cfg: dict) -> dict:
     )
 
     print(f"  Map grid: {s_ma['ny']} x {s_ma['nx']} pixels", end="")
-    print(f" ({cfg['map']['res_arcmin']:.1f} arcmin/pixel)")
+    print(f" ({cfg['map']['res_arcmin']:.1f} arcmin/pixel)", end="")
     print(f", centre = ({s_ma['ra0_deg']:.4f}, {s_ma['dec0_deg']:.4f}) [{s_ma['centre_source']}]")
 
     # Return a dictionary containing all computed parameters for subsequent pipeline steps

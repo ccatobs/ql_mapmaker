@@ -135,10 +135,44 @@ def _printLoadingBar(iteration, total, length=40):
         sys.stdout.flush()
 
 
+# ============================================================================ #
+# _resolve_det_selection
+def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarray]:
+    n_total = len(all_kids)
+    name_to_idx = {k: i for i, k in enumerate(all_kids)}
+
+    names = pd_cfg.get("detectors", [])
+    if names:
+        valid = [(n, name_to_idx[n]) for n in names if n in name_to_idx]
+        missing = [n for n in names if n not in name_to_idx]
+        if missing:
+            print(f"  Warning: {len(missing)} detector name(s) not found and skipped: {missing[:5]}")
+        kids_sel = [n for n, _ in valid]
+        sel_idx = np.array([i for _, i in valid], dtype=int)
+        return kids_sel, sel_idx
+
+    indices = pd_cfg.get("detector_indices", [])
+    if indices:
+        valid = [i for i in indices if 0 <= i < n_total]
+        if len(valid) < len(indices):
+            print(f"  Warning: {len(indices)-len(valid)} index/indices out of range and skipped")
+        sel_idx = np.array(valid, dtype=int)
+        kids_sel = [all_kids[i] for i in sel_idx]
+        return kids_sel, sel_idx
+
+    max_det = pd_cfg.get("max_detectors", 0)
+    if max_det > 0 and max_det < n_total:
+        sel_idx = np.linspace(0, n_total - 1, max_det, dtype=int)
+    else:
+        sel_idx = np.arange(n_total)
+    kids_sel = [all_kids[i] for i in sel_idx]
+    return kids_sel, sel_idx
+
+
 
 
 # ============================================================================ #
-# == STEPS
+# == PASSES ==
 # ============================================================================ #
 
 
@@ -244,6 +278,244 @@ def _firstPass(cfg: dict):
     return state
 
 
+
+# ============================================================================ #
+# _streamingPass
+def _streamingPass(
+    cfgs: dict,
+    state_1: dict,
+    current_map: np.ndarray = None,
+    common_mode: bool = True,
+    return_sample: bool = False,
+    collect_tod_rms: bool = False,
+    weights: np.ndarray = None
+    ):
+  
+    # cfg: dict, 
+    # pipe_cfg: dict,
+    # ra_edges: np.ndarray, 
+    # dec_edges: np.ndarray,
+    # det_offsets: np.ndarray,
+    # current_map: np.ndarray = None,
+    # common_mode: bool = True,
+    # return_sample: bool = False,
+    # keep_idx: np.ndarray = None,
+    # boresight_only: bool = False,
+    # collect_tod_rms: bool = False,
+    # compute_time_null: bool = True,
+    # compute_detsplit_null: bool = False,
+    # weights: np.ndarray = None):
+
+    pipe_cfg = cfgs['pipeline']
+    compute_time_null = pipe_cfg.get("compute_time_null", True)
+    compute_detsplit_null = pipe_cfg.get("compute_detsplit_null", True)
+    boresight_only = False
+
+    ny = len(state_1["dec_edges"]) - 1
+    nx = len(state_1["ra_edges"]) - 1
+    total_data = np.zeros((ny, nx), dtype=float)
+    total_hits = np.zeros((ny, nx), dtype=float)
+    total_sumsq = np.zeros((ny, nx), dtype=float)
+
+    null_map = None
+    if compute_time_null:
+        null_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+        null_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+
+    detsplit_null_map = None
+    if compute_detsplit_null:
+        n_dets_kept = len(state_1["det_offsets_kept"])
+        det_half = np.random.default_rng(0).integers(0, 2, size=n_dets_kept)
+        detsplit_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+        detsplit_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+
+    n_dets = sample_rate = None
+    psd_raw = psd_cm = None
+    tod_rms_data: list = []
+
+    # Configure cleaning steps used by clean_tod
+    clean_steps = pipe_cfg.get("clean_steps", [])
+    step_params = {
+        "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
+        "highpass":    pipe_cfg.get("highpass", {}),
+        "notch":       pipe_cfg.get("notch", {}),
+    }
+
+    for chunk in reader.iter_chunks(cfgs):
+        flags = chunk.flags
+        chunk_id = chunk.chunk_index
+        if np.all(flags != 0):
+            continue
+        if n_dets is None:
+            n_dets = len(chunk.kids)
+            sample_rate = chunk.sample_rate
+
+        ra = chunk.ra
+        dec = chunk.dec
+        flags = chunk.flags
+        no_per_detector_offsets = ra is None
+
+        if state_1["keep_idx"] is not None:
+            sig = chunk.signal[:, state_1["keep_idx"]] - state_1["det_offsets_kept"][np.newaxis, :]
+            flags = flags[:, state_1["keep_idx"]]
+            if ra is not None:
+                ra = ra[:, state_1["keep_idx"]]
+                dec = dec[:, state_1["keep_idx"]]
+        else:
+            sig = chunk.signal - state_1["det_offsets_kept"][np.newaxis, :]
+
+        flag_mask = np.ones(np.shape(flags))
+        flag_mask[flags != 0] = np.nan
+
+        if boresight_only or ra is None:
+            ra = np.repeat(chunk.ra_bore[:, np.newaxis], sig.shape[1], axis=1)
+            dec = np.repeat(chunk.dec_bore[:, np.newaxis], sig.shape[1], axis=1)
+            # ra = np.broadcast_to(chunk.ra_bore[:, np.newaxis], sig.shape) # maybe slightly faster
+            # dec = np.broadcast_to(chunk.dec_bore[:, np.newaxis], sig.shape)
+
+        if clean_steps:
+            sig, new_flags = tod.clean_tod(sig, flag_mask, chunk.sample_rate,
+                                       steps=clean_steps,
+                                       step_params=step_params)
+            if new_flags is None:
+                bin_flag_mask = flag_mask
+            else:
+                new_flags = np.asarray(new_flags)
+                if np.any(new_flags != 0):
+                    bin_flag_mask = flag_mask.copy()
+                    bin_flag_mask[new_flags != 0] = np.nan
+                else:
+                    bin_flag_mask = flag_mask
+        else:
+            new_flags = None
+            bin_flag_mask = flag_mask
+
+        if return_sample and psd_raw is None:
+            psd_raw = sig.copy()
+
+        if collect_tod_rms:
+            rms_raw = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0))))
+
+        if common_mode:
+            if current_map is not None:
+                sig = tod.iterate_common_mode(sig, flag_mask, ra, dec,
+                                          current_map, state_1["ra_edges"], state_1["dec_edges"])
+            else:
+                sig = tod.subtract_common_mode(sig, tod.estimate_common_mode(sig, flag_mask))
+
+        if return_sample and psd_cm is None:
+            psd_cm = sig.copy() * flag_mask
+
+        if collect_tod_rms:
+            rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
+            tod_rms_data.append((chunk.t_start, rms_raw, rms_cm))
+
+        d, h, sq = map.bin_chunk(sig, bin_flag_mask, ra, dec, state_1["ra_edges"], state_1["dec_edges"], weights=weights)
+        total_data += d
+        total_hits += h
+        total_sumsq += sq
+
+        if compute_time_null:
+            half = chunk_id % 2
+            null_data[half] += d
+            null_hits[half] += h
+
+        if compute_detsplit_null:
+            for dhalf in (0, 1):
+                m = det_half == dhalf
+                w_half = weights[m] if weights is not None else None
+                d_ds, h_ds, _ = map.bin_chunk(sig[:, m], bin_flag_mask[:, m], ra[:, m], dec[:, m],
+                                          state_1["ra_edges"], state_1["dec_edges"], weights=w_half)
+                detsplit_data[dhalf] += d_ds
+                detsplit_hits[dhalf] += h_ds
+
+    with np.errstate(invalid='ignore', divide='ignore'):
+        combined = np.where(total_hits > 0, total_data / total_hits, np.nan)
+        mean_sq = np.where(total_hits > 0, total_sumsq / total_hits, np.nan)
+        variance = np.clip(mean_sq - combined ** 2, 0, None)
+        noise_map = np.sqrt(variance / total_hits)
+
+        if compute_time_null:
+            map_a = np.where(null_hits[0] > 0, null_data[0] / null_hits[0], np.nan)
+            map_b = np.where(null_hits[1] > 0, null_data[1] / null_hits[1], np.nan)
+            null_map = (map_a - map_b) / 2.0
+
+        if compute_detsplit_null:
+            map_a_ds = np.where(detsplit_hits[0] > 0, detsplit_data[0] / detsplit_hits[0], np.nan)
+            map_b_ds = np.where(detsplit_hits[1] > 0, detsplit_data[1] / detsplit_hits[1], np.nan)
+            detsplit_null_map = (map_a_ds - map_b_ds) / 2.0
+
+    sample = {"raw": psd_raw, "cm": psd_cm} if return_sample else None
+
+    return {
+        'combined': combined,
+        'total_hits': total_hits,
+        'noise_map': noise_map,
+        'null_map': null_map,
+        'detsplit_null_map': detsplit_null_map,
+        'n_dets': n_dets,
+        'sample_rate': sample_rate,
+        'sample': sample,
+        'tod_rms_data': tod_rms_data
+    }
+
+    # return (combined, total_hits, noise_map, null_map, detsplit_null_map,
+    #         n_dets, sample_rate, sample, tod_rms_data)
+
+
+# ============================================================================ #
+# _per_detector_pass
+def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
+                       ra_edges: np.ndarray, dec_edges: np.ndarray,
+                       det_offsets: np.ndarray):
+    ny = len(dec_edges) - 1
+    nx = len(ra_edges) - 1
+
+    apply_offsets = pd_cfg.get("apply_offsets", True)
+    kids_sel = sel_idx = None
+    det_data = det_hits = None
+
+    for chunk in reader.iter_chunks(cfg, apply_offsets=apply_offsets):
+        if kids_sel is None:
+            kids_sel, sel_idx = _resolve_det_selection(chunk.kids, pd_cfg)
+            n_sel = len(kids_sel)
+            det_data = np.zeros((n_sel, ny, nx), dtype=np.float32)
+            det_hits = np.zeros((n_sel, ny, nx), dtype=np.float32)
+
+        flags = chunk.flags
+        flag_mask = np.ones(np.shape(flags))
+        flag_mask[flags != 0] = np.nan
+        sig = chunk.signal - det_offsets[np.newaxis, :]
+
+        sig, new_flags = tod.clean_tod(sig, flag_mask, chunk.sample_rate,
+                                   steps=pipe_cfg.get("clean_steps", []),
+                                   step_params={
+                                       "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
+                                       "highpass": pipe_cfg.get("highpass", {}),
+                                       "notch": pipe_cfg.get("notch", {}),
+                                   })
+
+        bin_flag_mask = np.where(new_flags != 0, np.nan, flag_mask)
+
+        for j, i in enumerate(sel_idx):
+            if apply_offsets:
+                ra, dec = chunk.ra[:, i], chunk.dec[:, i]
+            else:
+                ra, dec = chunk.ra_bore, chunk.dec_bore
+            d, h = map.bin_detector(sig[:, i], bin_flag_mask[:, i], ra, dec, ra_edges, dec_edges)
+            det_data[j] += d
+            det_hits[j] += h
+
+    return kids_sel, det_data, det_hits
+
+
+
+
+# ============================================================================ #
+# == STEPS ==
+# ============================================================================ #
+
+
 # ============================================================================ #
 # _step1
 def _step1(cfg: dict) -> dict:
@@ -334,354 +606,50 @@ def _step1(cfg: dict) -> dict:
     }
 
 
-
-
 # ============================================================================ #
-# PER-DETECTOR PASS & SHIFTS
-# ============================================================================ #
+# _step2
+def _step2(cfg: dict, state_1: dict) -> dict:
+    """
+    """
 
+    print(f"Step 2")
 
-# ============================================================================ #
-#   _resolve_det_selection
-def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarray]:
-    n_total = len(all_kids)
-    name_to_idx = {k: i for i, k in enumerate(all_kids)}
-
-    names = pd_cfg.get("detectors", [])
-    if names:
-        valid = [(n, name_to_idx[n]) for n in names if n in name_to_idx]
-        missing = [n for n in names if n not in name_to_idx]
-        if missing:
-            print(f"  Warning: {len(missing)} detector name(s) not found and skipped: {missing[:5]}")
-        kids_sel = [n for n, _ in valid]
-        sel_idx = np.array([i for _, i in valid], dtype=int)
-        return kids_sel, sel_idx
-
-    indices = pd_cfg.get("detector_indices", [])
-    if indices:
-        valid = [i for i in indices if 0 <= i < n_total]
-        if len(valid) < len(indices):
-            print(f"  Warning: {len(indices)-len(valid)} index/indices out of range and skipped")
-        sel_idx = np.array(valid, dtype=int)
-        kids_sel = [all_kids[i] for i in sel_idx]
-        return kids_sel, sel_idx
-
-    max_det = pd_cfg.get("max_detectors", 0)
-    if max_det > 0 and max_det < n_total:
-        sel_idx = np.linspace(0, n_total - 1, max_det, dtype=int)
-    else:
-        sel_idx = np.arange(n_total)
-    kids_sel = [all_kids[i] for i in sel_idx]
-    return kids_sel, sel_idx
-
-
-# ============================================================================ #
-#   _per_detector_pass
-def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
-                       ra_edges: np.ndarray, dec_edges: np.ndarray,
-                       det_offsets: np.ndarray):
-    ny = len(dec_edges) - 1
-    nx = len(ra_edges) - 1
-
-    apply_offsets = pd_cfg.get("apply_offsets", True)
-    kids_sel = sel_idx = None
-    det_data = det_hits = None
-
-    for chunk in reader.iter_chunks(cfg, apply_offsets=apply_offsets):
-        if kids_sel is None:
-            kids_sel, sel_idx = _resolve_det_selection(chunk.kids, pd_cfg)
-            n_sel = len(kids_sel)
-            det_data = np.zeros((n_sel, ny, nx), dtype=np.float32)
-            det_hits = np.zeros((n_sel, ny, nx), dtype=np.float32)
-
-        flags = chunk.flags
-        flag_mask = np.ones(np.shape(flags))
-        flag_mask[flags != 0] = np.nan
-        sig = chunk.signal - det_offsets[np.newaxis, :]
-
-        sig, new_flags = tod.clean_tod(sig, flag_mask, chunk.sample_rate,
-                                   steps=pipe_cfg.get("clean_steps", []),
-                                   step_params={
-                                       "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
-                                       "highpass": pipe_cfg.get("highpass", {}),
-                                       "notch": pipe_cfg.get("notch", {}),
-                                   })
-
-        bin_flag_mask = np.where(new_flags != 0, np.nan, flag_mask)
-
-        for j, i in enumerate(sel_idx):
-            if apply_offsets:
-                ra, dec = chunk.ra[:, i], chunk.dec[:, i]
-            else:
-                ra, dec = chunk.ra_bore, chunk.dec_bore
-            d, h = map.bin_detector(sig[:, i], bin_flag_mask[:, i], ra, dec, ra_edges, dec_edges)
-            det_data[j] += d
-            det_hits[j] += h
-
-    return kids_sel, det_data, det_hits
-
-
-# ============================================================================ #
-#   _compute_shifts_from_pd_results
-def _compute_shifts_from_pd_results(pd_results: tuple, ra_edges: np.ndarray, dec_edges: np.ndarray,
-                                     ra0_deg: float, dec0_deg: float, pd_cfg: dict) -> dict:
-    kids_sel, det_data, det_hits = pd_results
-    ra_centres = 0.5 * (ra_edges[:-1] + ra_edges[1:])
-    dec_centres = 0.5 * (dec_edges[:-1] + dec_edges[1:])
-    min_snr = pd_cfg.get("shift_min_snr", 3.0)
-    kid_shifts = {}
-
-    for j, kid in enumerate(kids_sel):
-        with np.errstate(invalid="ignore", divide="ignore"):
-            m = np.where(det_hits[j] > 0, det_data[j] / det_hits[j], np.nan)
-        if not np.any(np.isfinite(m)):
-            continue
-
-        filled = np.where(np.isfinite(m), m, np.nanmedian(m))
-        smoothed = gaussian_filter(filled, sigma=2)
-        iy, ix = np.unravel_index(np.argmax(smoothed), smoothed.shape)
-
-        off_mask = np.isfinite(m) & (m < np.nanpercentile(m[np.isfinite(m)], 50))
-        noise = np.sqrt(np.nanmean(m[off_mask] ** 2)) if off_mask.any() else np.nan
-        peak_val = m[iy, ix]
-        peak_snr = peak_val / noise if (np.isfinite(noise) and noise > 0 and np.isfinite(peak_val)) else np.nan
-
-        if np.isfinite(peak_snr) and peak_snr >= min_snr:
-            kid_shifts[kid] = (ra0_deg - ra_centres[ix], dec0_deg - dec_centres[iy])
-
-    print(f"  Computed shifts for {len(kid_shifts)}/{len(kids_sel)} detectors (S/N >= {min_snr})")
-    return kid_shifts
-
-
-
-
-# ============================================================================ #
-# STREAMING PASS DRIVER
-# ============================================================================ #
-
-
-# ============================================================================ #
-#   _streaming_pass
-def _streaming_pass(cfg: dict, pipe_cfg: dict,
-                    ra_edges: np.ndarray, dec_edges: np.ndarray,
-                    det_offsets: np.ndarray,
-                    current_map: np.ndarray = None,
-                    common_mode: bool = True,
-                    return_sample: bool = False,
-                    keep_idx: np.ndarray = None,
-                    boresight_only: bool = False,
-                    collect_tod_rms: bool = False,
-                    kids_kept: list = None,
-                    kid_shifts: dict = None,
-                    compute_time_null: bool = True,
-                    compute_detsplit_null: bool = False,
-                    weights: np.ndarray = None):
-    ny = len(dec_edges) - 1
-    nx = len(ra_edges) - 1
-    total_data = np.zeros((ny, nx), dtype=float)
-    total_hits = np.zeros((ny, nx), dtype=float)
-    total_sumsq = np.zeros((ny, nx), dtype=float)
-
-    null_map = None
-    if compute_time_null:
-        null_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
-        null_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
-
-    detsplit_null_map = None
-    if compute_detsplit_null:
-        n_dets_kept = len(det_offsets)
-        det_half = np.random.default_rng(0).integers(0, 2, size=n_dets_kept)
-        detsplit_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
-        detsplit_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
-
-    n_dets = sample_rate = None
-    psd_raw = psd_cm = None
-    tod_rms_data: list = []
-
-    # Configure cleaning steps used by clean_tod
-    clean_steps = pipe_cfg.get("clean_steps", [])
-    step_params = {
-        "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
-        "highpass":    pipe_cfg.get("highpass", {}),
-        "notch":       pipe_cfg.get("notch", {}),
-    }
-
-    # Prepare per-detector shifts (if provided)
-    # kid_shifts is expected to be a dict mapping detector-name -> (dr, ddec)
-    # kids_kept should be the list of detector names in the same column order
-    shift_ra = shift_dec = None
-    if kid_shifts is not None and kids_kept is not None:
-        # produce 1-D arrays of per-detector RA/Dec shifts so adding them to
-        # ra/dec (shape [n_samps, n_det]) will broadcast across time samples.
-        shift_ra = np.array([kid_shifts.get(k, (0.0, 0.0))[0] for k in kids_kept])
-        shift_dec = np.array([kid_shifts.get(k, (0.0, 0.0))[1] for k in kids_kept])
-
-    for chunk in reader.iter_chunks(cfg):
-        flags = chunk.flags
-        chunk_id = chunk.chunk_index
-        if np.all(flags != 0):
-            continue
-        if n_dets is None:
-            n_dets = len(chunk.kids)
-            sample_rate = chunk.sample_rate
-
-        ra = chunk.ra
-        dec = chunk.dec
-        flags = chunk.flags
-        no_per_detector_offsets = ra is None
-
-        if keep_idx is not None:
-            sig = chunk.signal[:, keep_idx] - det_offsets[np.newaxis, :]
-            flags = flags[:, keep_idx]
-            if ra is not None:
-                ra = ra[:, keep_idx]
-                dec = dec[:, keep_idx]
-        else:
-            sig = chunk.signal - det_offsets[np.newaxis, :]
-
-        flag_mask = np.ones(np.shape(flags))
-        flag_mask[flags != 0] = np.nan
-
-        if boresight_only or ra is None:
-            ra = np.repeat(chunk.ra_bore[:, np.newaxis], sig.shape[1], axis=1)
-            dec = np.repeat(chunk.dec_bore[:, np.newaxis], sig.shape[1], axis=1)
-            # ra = np.broadcast_to(chunk.ra_bore[:, np.newaxis], sig.shape) # maybe slightly faster
-            # dec = np.broadcast_to(chunk.dec_bore[:, np.newaxis], sig.shape)
-
-            if no_per_detector_offsets and not boresight_only and shift_ra is not None:
-                ra = ra + shift_ra
-                dec = dec + shift_dec
-
-        if clean_steps:
-            sig, new_flags = tod.clean_tod(sig, flag_mask, chunk.sample_rate,
-                                       steps=clean_steps,
-                                       step_params=step_params)
-            if new_flags is None:
-                bin_flag_mask = flag_mask
-            else:
-                new_flags = np.asarray(new_flags)
-                if np.any(new_flags != 0):
-                    bin_flag_mask = flag_mask.copy()
-                    bin_flag_mask[new_flags != 0] = np.nan
-                else:
-                    bin_flag_mask = flag_mask
-        else:
-            new_flags = None
-            bin_flag_mask = flag_mask
-
-        if return_sample and psd_raw is None:
-            psd_raw = sig.copy()
-
-        if collect_tod_rms:
-            rms_raw = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0))))
-
-        if common_mode:
-            if current_map is not None:
-                sig = tod.iterate_common_mode(sig, flag_mask, ra, dec,
-                                          current_map, ra_edges, dec_edges)
-            else:
-                sig = tod.subtract_common_mode(sig, tod.estimate_common_mode(sig, flag_mask))
-
-        if return_sample and psd_cm is None:
-            psd_cm = sig.copy() * flag_mask
-
-        if collect_tod_rms:
-            rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
-            tod_rms_data.append((chunk.t_start, rms_raw, rms_cm))
-
-        d, h, sq = map.bin_chunk(sig, bin_flag_mask, ra, dec, ra_edges, dec_edges, weights=weights)
-        total_data += d
-        total_hits += h
-        total_sumsq += sq
-
-        if compute_time_null:
-            half = chunk_id % 2
-            null_data[half] += d
-            null_hits[half] += h
-
-        if compute_detsplit_null:
-            for dhalf in (0, 1):
-                m = det_half == dhalf
-                w_half = weights[m] if weights is not None else None
-                d_ds, h_ds, _ = map.bin_chunk(sig[:, m], bin_flag_mask[:, m], ra[:, m], dec[:, m],
-                                          ra_edges, dec_edges, weights=w_half)
-                detsplit_data[dhalf] += d_ds
-                detsplit_hits[dhalf] += h_ds
-
-    with np.errstate(invalid='ignore', divide='ignore'):
-        combined = np.where(total_hits > 0, total_data / total_hits, np.nan)
-        mean_sq = np.where(total_hits > 0, total_sumsq / total_hits, np.nan)
-        variance = np.clip(mean_sq - combined ** 2, 0, None)
-        noise_map = np.sqrt(variance / total_hits)
-
-        if compute_time_null:
-            map_a = np.where(null_hits[0] > 0, null_data[0] / null_hits[0], np.nan)
-            map_b = np.where(null_hits[1] > 0, null_data[1] / null_hits[1], np.nan)
-            null_map = (map_a - map_b) / 2.0
-
-        if compute_detsplit_null:
-            map_a_ds = np.where(detsplit_hits[0] > 0, detsplit_data[0] / detsplit_hits[0], np.nan)
-            map_b_ds = np.where(detsplit_hits[1] > 0, detsplit_data[1] / detsplit_hits[1], np.nan)
-            detsplit_null_map = (map_a_ds - map_b_ds) / 2.0
-
-    sample = {"raw": psd_raw, "cm": psd_cm} if return_sample else None
-    return (combined, total_hits, noise_map, null_map, detsplit_null_map,
-            n_dets, sample_rate, sample, tod_rms_data)
-
-
-
-
-# ============================================================================ #
-# STEPS 2, & 3: MAPMAKING PASSES
-# ============================================================================ #
-
-
-# ============================================================================ #
-#   step_2_naive_and_initial_cm
-def step_2_naive_and_initial_cm(cfg: dict, step1_res: dict, kid_shifts: dict | None) -> dict:
     pipe_cfg = cfg["pipeline"]
     chunk_s = pipe_cfg.get("chunk_duration_s", 1.0)
+    
+    t = time.perf_counter()
+    s_sp1 = _streamingPass( # state var
+        cfg, state_1,
+        common_mode=False, return_sample=True,
+    )
+    t1 = time.perf_counter() - t
+
+    print(f"  Naive map (chunk_duration_s={chunk_s})")
+    print(f"    {s_sp1['n_dets']} detectors, {sr:.1f} Hz, [{t1:.1f}s]")
 
     t = time.perf_counter()
-    print(f"Step 2: Naive map (chunk_duration_s={chunk_s})...")
-    naive, _, _, _, _, n_dets, sr, raw_sample, _ = _streaming_pass(
-        cfg, pipe_cfg, step1_res["ra_edges"], step1_res["dec_edges"],
-        step1_res["det_offsets_kept"], common_mode=False, return_sample=True,
-        keep_idx=step1_res["keep_idx"], kids_kept=step1_res["kids_kept"],
-        kid_shifts=kid_shifts, weights=step1_res["det_weights_kept"],
-        compute_time_null=pipe_cfg.get("compute_time_null", True)
+    s_sp2 = _streamingPass(
+        cfg, state_1, 
+        return_sample=True, collect_tod_rms=True,
+        weights=state_1["det_weights_kept"]
     )
-    t_naive = time.perf_counter() - t
-    print(f"  {n_dets} detectors, {sr:.1f} Hz  [{t_naive:.1f}s]")
+    t2 = time.perf_counter() - t
 
-    t = time.perf_counter()
-    print("Step 2: Initial common-mode pass...")
-    (combined_map, hits, noise_map, null_map, detsplit_null_map,
-     _, _, cm_sample, tod_rms_data) = _streaming_pass(
-        cfg, pipe_cfg, step1_res["ra_edges"], step1_res["dec_edges"],
-        step1_res["det_offsets_kept"], return_sample=True,
-        keep_idx=step1_res["keep_idx"], collect_tod_rms=True,
-        kids_kept=step1_res["kids_kept"], kid_shifts=kid_shifts,
-        compute_time_null=pipe_cfg.get("compute_time_null", True),
-        compute_detsplit_null=pipe_cfg.get("compute_detsplit_null", True),
-        weights=step1_res["det_weights_kept"]
-    )
-    t_it0 = time.perf_counter() - t
-    print(f"  [{t_it0:.1f}s]")
+    print(f"  Initial common-mode pass [{t2:.1f}s]")
 
     return {
-        "naive": naive,
-        "combined_map": combined_map,
-        "hits": hits,
-        "noise_map": noise_map,
-        "null_map": null_map,
-        "detsplit_null_map": detsplit_null_map,
-        "sr": sr,
-        "raw_sample": raw_sample,
-        "cm_sample": cm_sample,
-        "tod_rms_data": tod_rms_data,
-        "t_naive": t_naive,
-        "t_it0": t_it0,
+        "naive": s_sp1['combined'],
+        "combined_map": s_sp2['combined'],
+        "hits": s_sp2['total_hits'],
+        "noise_map": s_sp2['noise_map'],
+        "null_map": s_sp2['null_map'],
+        "detsplit_null_map": s_sp2['detsplit_null_map'],
+        "sr": s_sp1['sample_rate'],
+        "raw_sample": s_sp1['sample'],
+        "cm_sample": s_sp2['sample'],
+        "tod_rms_data": s_sp2['tod_rms_data'],
+        "t_naive": t1,
+        "t_it0": t2,
     }
 
 
@@ -942,13 +910,13 @@ def main():
 
     # TODO: audit from here
 
-    step2_res = step_2_naive_and_initial_cm(cfgs, state_1, kid_shifts)
+    state_2 = _step2(cfgs, state_1)
 
     combined_map, cm_maps, pass_times = step_3_iterations(
-        cfgs, state_1, step2_res, kid_shifts)
+        cfgs, state_1, state_2, kid_shifts)
 
     out_dir, metadata = step_4_save_outputs(
-        cfgs, state_1, step2_res, cm_maps, pass_times, t_total)
+        cfgs, state_1, state_2, cm_maps, pass_times, t_total)
 
     step_5_boresight_comparison(cfgs, state_1, combined_map, out_dir)
 

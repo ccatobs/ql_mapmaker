@@ -121,59 +121,35 @@ def _precalcChunkTotal(cfg):
 
     if cfg["data"]["format"] == "lab":
 
-        total_samples = 0
-        sample_rate = None
+        # Create a lightweight generator that simulates exactly what iter_chunks does, 
+        # but only yields empty/lightweight objects or counts them via _rechunk
         chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
-        file_fmt = cfg["data"]["file_format"]
+        start_offset_s   = cfg["pipeline"].get("start_offset_s", 0.0)
+        max_duration_s   = cfg["pipeline"].get("max_duration_s", None)
 
+        # Gather files the exact same way iter_chunks does
         files = []
+        file_fmt = cfg["data"]["file_format"]
         for pattern in cfg["data"]["input_dirs"]:
             for d in sorted(glob.glob(pattern)):
                 files.extend(sorted(pathlib.Path(d).rglob(f"*.{file_fmt}")))
-        
-        for path in files:
-            with h5py.File(path, 'r') as f:
-                if "timestream" not in f:
-                    continue
-                timestream_grp = f["timestream"]
-                for block in timestream_grp.keys():
-                    frames_grp = timestream_grp[block].get("frames")
-                    if frames_grp is None:
-                        continue
-                    
-                    for fk in sorted([k for k in frames_grp.keys() if k.isdigit()], key=int):
-                        b_frame = frames_grp[fk]
-                        frame_type = b_frame.attrs.get("frame_type", b"")
-                        if isinstance(frame_type, bytes):
-                            frame_type = frame_type.decode("utf-8")
-                        if frame_type != "Scan":
-                            continue
 
-                        min_samps = None
-                        ref_times = None
-                        for b in timestream_grp.keys():
-                            sub_frame = timestream_grp[f"{b}/frames/{fk}"]
-                            if "data" in sub_frame and "times" in sub_frame["data"]:
-                                times_ds = sub_frame["data"]["times"][:]
-                                n_samps = len(times_ds)
-                                if min_samps is None or n_samps < min_samps:
-                                    min_samps = n_samps
-                                    ref_times = times_ds
+        # Feed reader's internal lab frame iterator directly into _rechunk
+        frame_iter = reader._iter_h5_lab_frames(files, apply_offsets=False)
+        chunked_iter = reader._rechunk(frame_iter, chunk_duration_s)
 
-                        if not min_samps:
-                            continue
-
-                        if sample_rate is None and ref_times is not None:
-                            t_start = ref_times[0] / core.G3Units.s
-                            t_stop = ref_times[-1] / core.G3Units.s
-                            if t_stop > t_start:
-                                sample_rate = min_samps / (t_stop - t_start)
-
-                        total_samples += min_samps
-
-        sr = sample_rate if sample_rate is not None else 1.0
-        chunk_n = max(1, int(chunk_duration_s * sr)) if chunk_duration_s > 0 else total_samples
-        total_chunks = math.ceil(total_samples / chunk_n) if total_samples > 0 else None
+        # Quickly count chunks while respecting start_offset_s and max_duration_s filters
+        total_chunks = 0
+        t_obs_start = None
+        for chunk in chunked_iter:
+            if t_obs_start is None:
+                t_obs_start = chunk.t_start
+            elapsed = chunk.t_stop - t_obs_start
+            if elapsed <= start_offset_s:
+                continue
+            if max_duration_s is not None and (chunk.t_start - t_obs_start) >= start_offset_s + max_duration_s:
+                break
+            total_chunks += 1
 
         return {
             'total_chunks': total_chunks

@@ -116,19 +116,99 @@ def _setupProfiler(args):
 # ============================================================================ #
 # _precalcChunkTotal
 def _precalcChunkTotal(cfg):
+    """Estimate the number of chunks without loading the detector timestreams.
     """
-    """
 
-    if cfg["data"]["format"] == "lab":
+    if cfg["data"]["format"] != "lab":
+        return {"total_chunks": None}
 
-        # TODO: how to find total_chunks?
-        total_chunks = 1000
+    if cfg["data"]["format"] != "blasttng":
+        return {"total_chunks": None}
 
-        return {
-            'total_chunks': total_chunks
-        }
+    files = []
+    file_format = cfg["data"]["file_format"]
+    for pattern in cfg["data"]["input_dirs"]:
+        for directory in sorted(glob.glob(pattern)):
+            files.extend(sorted(pathlib.Path(directory).rglob(f"*.{file_format}")))
 
-    return None
+    if not files:
+        return {"total_chunks": None}
+
+    total_samples = 0
+    scan_frames = 0
+    sample_rate_ref = None
+    chunk_sample_rate = None
+
+    for path in files:
+        with h5py.File(path, "r") as f:
+            if "timestream" not in f:
+                continue
+            timestream = f["timestream"]
+            blocks = list(timestream.keys())
+            if not blocks:
+                continue
+
+            first_block_frames = timestream[blocks[0]].get("frames")
+            if first_block_frames is None:
+                continue
+            frame_keys = sorted(
+                (key for key in first_block_frames.keys() if key.isdigit()),
+                key=int,
+            )
+
+            for frame_key in frame_keys:
+                sample_frame = first_block_frames[frame_key]
+                frame_type = sample_frame.attrs.get("frame_type", b"")
+                if isinstance(frame_type, bytes):
+                    frame_type = frame_type.decode("utf-8")
+                if frame_type != "Scan":
+                    continue
+
+                min_samples = None
+                reference_times = None
+                for block in blocks:
+                    frame_path = f"timestream/{block}/frames/{frame_key}"
+                    if frame_path not in f:
+                        continue
+                    block_frame = f[frame_path]
+                    if (
+                        "data" not in block_frame
+                        or "data" not in block_frame["data"]
+                        or "times" not in block_frame["data"]
+                    ):
+                        continue
+
+                    times = block_frame["data"]["times"]
+                    n_samples = times.shape[0]
+                    if min_samples is None or n_samples < min_samples:
+                        min_samples = n_samples
+                    if reference_times is None:
+                        reference_times = times
+
+                if not min_samples:
+                    continue
+
+                scan_frames += 1
+                total_samples += min_samples
+
+                if sample_rate_ref is None and reference_times is not None:
+                    t_start = reference_times[0] / core.G3Units.s
+                    t_stop = reference_times[min_samples - 1] / core.G3Units.s
+                    if t_stop > t_start:
+                        sample_rate_ref = min_samples / (t_stop - t_start)
+                if chunk_sample_rate is None:
+                    chunk_sample_rate = sample_rate_ref or 1.0
+
+    chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
+    if chunk_duration_s <= 0:
+        total_chunks = scan_frames
+    elif total_samples == 0:
+        total_chunks = 0
+    else:
+        chunk_size = max(1, int(chunk_duration_s * (chunk_sample_rate or 1.0)))
+        total_chunks = (total_samples + chunk_size - 1) // chunk_size
+
+    return {"total_chunks": total_chunks}
 
 
 # ============================================================================ #

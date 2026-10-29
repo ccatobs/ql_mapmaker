@@ -53,8 +53,11 @@ import h5py
 from dataclasses import dataclass
 from spt3g import core # type: ignore
 
-import coord
-import tod
+from mapmaker import tod
+# from mapmaker import map
+from mapmaker import coord
+# from mapmaker import output
+# from mapmaker import reader
 
 
 # ============================================================================ #

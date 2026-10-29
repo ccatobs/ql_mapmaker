@@ -7,7 +7,7 @@
 # data
 [data]
 
-input_dirs = ["/home/player1/map_making_audrey/roach1_data"]
+input_dirs = ["/home/player1/map_making_vlad/sample_h5"]
 
 # "g3", "h5"
 file_format = "h5"

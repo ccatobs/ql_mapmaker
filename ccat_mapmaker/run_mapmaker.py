@@ -121,16 +121,15 @@ def _precalcChunkTotal(cfg):
 
     if cfg["data"]["format"] == "lab":
 
-        total_chunks = 0
-        file_fmt = cfg["data"]["file_format"]
+        total_samples = 0
+        sample_rate = None
         chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
+        file_fmt = cfg["data"]["file_format"]
 
         files = []
         for pattern in cfg["data"]["input_dirs"]:
             for d in sorted(glob.glob(pattern)):
                 files.extend(sorted(pathlib.Path(d).rglob(f"*.{file_fmt}")))
-
-        sample_rate_ref = None
         
         for path in files:
             with h5py.File(path, 'r') as f:

@@ -233,11 +233,15 @@ def _prepPass(cfg: dict):
         ra_sum          += chunk.ra_bore.sum()
         dec_sum         += chunk.dec_bore.sum()
         n_bore          += len(chunk.ra_bore)
-        # det_median_sum  += np.nanmedian(chunk.signal, axis=0)
         det_diff_sum    += np.nansum(diffs, axis=0)
         det_diff_sum_sq += np.nansum((diffs ** 2), axis=0)
         det_diff_count  += np.sum(valid_mask, axis=0)
         n_chunks        += 1
+
+        # The median calculation is the bottleneck for this entire pass.
+        # We are using a strided median instead to reduce computation.
+        # det_median_sum  += np.nanmedian(chunk.signal, axis=0) # t=0.48 s
+        det_median_sum  += np.nanmedian(chunk.signal[::4, :], axis=0)
 
         print("5: ", time.perf_counter() - t)
         t = time.perf_counter()

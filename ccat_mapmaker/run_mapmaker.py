@@ -178,8 +178,8 @@ def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarr
 
 
 # ============================================================================ #
-# _firstPass
-def _firstPass(cfg: dict):
+# _prepPass
+def _prepPass(cfg: dict):
     """Streaming loop over all data chunks to compute:
     - Boresight pointing averages (for map center fallback)
     - Per-detector medians and noise estimates (via temporal differences)
@@ -238,13 +238,13 @@ def _firstPass(cfg: dict):
         n_chunks        += 1
 
         # Sxx, adding per loop
-        if chunk.signal.shape[0] == nominal_chunk_len:
-            f, p = welch(chunk.signal, fs=sample_rate, window="hann", axis=0)
-            if psd_sum is None:
-                psd_sum = np.zeros_like(p)
-                psd_freqs = f
-            psd_sum += p
-            psd_count += 1
+        # if chunk.signal.shape[0] == nominal_chunk_len:
+        #     f, p = welch(chunk.signal, fs=sample_rate, window="hann", axis=0)
+        #     if psd_sum is None:
+        #         psd_sum = np.zeros_like(p)
+        #         psd_freqs = f
+        #     psd_sum += p
+        #     psd_count += 1
 
         # stop time is from last chunk
         t_obs_stop = chunk.t_stop
@@ -297,8 +297,8 @@ def _firstPass(cfg: dict):
     # weights: np.ndarray = None):
 
 # ============================================================================ #
-# _streamingPass
-def _streamingPass(
+# _mapPass
+def _mapPass(
     cfgs: dict,
     state_1: dict,
     current_map: np.ndarray = None,
@@ -307,16 +307,13 @@ def _streamingPass(
     collect_tod_rms: bool = False,
     weights: np.ndarray = None
     ):
-  
-    # TODO: loading bar?
 
     pipe_cfg = cfgs['pipeline']
     compute_time_null = pipe_cfg.get("compute_time_null", True)
     compute_detsplit_null = pipe_cfg.get("compute_detsplit_null", True)
     boresight_only = False
+    nx, ny = state_1['nx'], state_1['ny']
 
-    ny = len(state_1["dec_edges"]) - 1
-    nx = len(state_1["ra_edges"]) - 1
     total_data = np.zeros((ny, nx), dtype=float)
     total_hits = np.zeros((ny, nx), dtype=float)
     total_sumsq = np.zeros((ny, nx), dtype=float)
@@ -543,7 +540,7 @@ def _mapPrep(cfg: dict) -> dict:
     # - Boresight pointing averages (for map center fallback).
     # - Per-detector medians and noise estimates (via temporal differences).
     # - Average PSD and white noise floor characteristics.
-    s_fp = _firstPass(cfg) # state var
+    s_fp = _prepPass(cfg) # state var
 
     print(f"  First pass done. [{time.perf_counter()-t:.1f} s]")
     t = time.perf_counter()
@@ -614,8 +611,8 @@ def _mapPrep(cfg: dict) -> dict:
 
 
 # ============================================================================ #
-# _makeMap
-def _makeMap(cfg: dict, state_1: dict) -> dict:
+# _makeMaps
+def _makeMaps(cfg: dict, state_1: dict) -> dict:
     """
     1. Make a 'naive' first map
     2. Make a more robust map:
@@ -632,7 +629,7 @@ def _makeMap(cfg: dict, state_1: dict) -> dict:
 
     # Make a 'naive' first map
     t = time.perf_counter()
-    s_sp1 = _streamingPass( # state var
+    s_sp1 = _mapPass( # state var
         cfg, state_1,
         common_mode=False, return_sample=True,
     )
@@ -649,7 +646,7 @@ def _makeMap(cfg: dict, state_1: dict) -> dict:
     # - Null map (difference between two random samples of kids).
     # TODO: null map needs to be separated from streaming pass and improved.
     t = time.perf_counter()
-    s_sp2 = _streamingPass(
+    s_sp2 = _mapPass(
         cfg, state_1, 
         return_sample=True, collect_tod_rms=True,
         weights=state_1["det_weights_kept"]
@@ -941,7 +938,7 @@ def main():
     # - Hits map.
     # - Noise map.
     # - Null map (difference between two random samples of kids).
-    state_2 = _makeMap(cfgs, state_1)
+    state_2 = _makeMaps(cfgs, state_1)
 
     # TODO: audit streamer
     # TODO: audit from here

@@ -112,6 +112,12 @@ def _setupProfiler(args):
 
 
 
+
+# ============================================================================ #
+# == TOOLS ==
+# ============================================================================ #
+
+
 # ============================================================================ #
 # _printLoadingBar
 def _printLoadingBar(iteration=1, total=1, length=40, clear=False):
@@ -134,6 +140,28 @@ def _printLoadingBar(iteration=1, total=1, length=40, clear=False):
     bar = '█' * filled_length + '-' * (length - filled_length)
     sys.stdout.write(f'\r|{bar}| {percent:.1f}% Complete')
     sys.stdout.flush()
+
+
+# ============================================================================ #
+# _fastPeriodogram
+def _fastPeriodogram(signal, window, window_scale, med, length):
+    """This is used to replace the slow Welch.
+    """
+
+    # We need to remove the baseline to avoid PSD spike
+    signal_centered = signal - med
+
+    windowed_signal = signal_centered * window
+    fft_res = np.fft.rfft(windowed_signal, axis=0)
+    
+    # Compute power spectral density
+    p = (np.abs(fft_res)**2) / window_scale
+    if length % 2 == 0:
+        p[1:-1, :] *= 2
+    else:
+        p[1:, :] *= 2
+
+    return p
 
 
 # ============================================================================ #
@@ -214,6 +242,11 @@ def _prepPass(cfg: dict):
             det_diff_sum_sq = np.zeros(n_dets)
             det_diff_count = np.zeros(n_dets, dtype=int)
 
+            # Percalcuations for the FFT periodgram
+            window = np.hanning(nominal_chunk_len)[:, None]
+            window_scale = sample_rate * np.sum(window**2)
+            freqs = np.fft.rfftfreq(nominal_chunk_len, d=1.0/sample_rate)
+
             psd_sum = None # will be initialized in Sxx section
 
             init = True
@@ -238,20 +271,25 @@ def _prepPass(cfg: dict):
         det_diff_count  += np.sum(valid_mask, axis=0)
         n_chunks        += 1
 
-        # The median calculation is the bottleneck for this entire pass.
+        # The median calc is the major bottleneck (t=0.48 s).
         # We are using a strided median instead to reduce computation.
-        # det_median_sum  += np.nanmedian(chunk.signal, axis=0) # t=0.48 s
-        det_median_sum  += np.nanmedian(chunk.signal[::4, :], axis=0)
+        # det_median_sum  += np.nanmedian(chunk.signal, axis=0)
+        det_median = np.nanmedian(chunk.signal[::4, :], axis=0)
+        det_median_sum  += det_median
 
         print("5: ", time.perf_counter() - t)
         t = time.perf_counter()
 
-        # Sxx, adding per loop (t=0.16 s)
+        # Sxx, adding per loop.
+        # This is the second bottle neck (t=0.16 s).
         if chunk.signal.shape[0] == nominal_chunk_len:
-            f, p = welch(chunk.signal, fs=sample_rate, window="hann", axis=0)
+            # f, p = welch(chunk.signal, fs=sample_rate, window="hann", axis=0)
+            p = _fastPeriodogram(
+                chunk.signal, window, window_scale, 
+                det_median, nominal_chunk_len)
             if psd_sum is None:
                 psd_sum = np.zeros_like(p)
-                psd_freqs = f
+                psd_freqs = freqs
             psd_sum += p
             psd_count += 1
 

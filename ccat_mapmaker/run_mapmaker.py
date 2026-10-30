@@ -260,8 +260,6 @@ def _prepPass(cfg: dict):
         diffs = signal_masked[1:] - signal_masked[:-1]
         valid_mask = np.isfinite(diffs)
 
-        t = time.perf_counter()
-
         # Advance accumulations (t=0.53 s)
         ra_sum          += chunk.ra_bore.sum()
         dec_sum         += chunk.dec_bore.sum()
@@ -277,11 +275,9 @@ def _prepPass(cfg: dict):
         det_median = np.nanmedian(chunk.signal[::4, :], axis=0)
         det_median_sum  += det_median
 
-        print("5: ", time.perf_counter() - t)
-        t = time.perf_counter()
-
         # Sxx, adding per loop.
-        # This is the second bottle neck (t=0.16 s).
+        # The Welch is the second bottle neck (t=0.16 s).
+        # _fastPeriodogram is slightly faster (t=0.13 s). 
         if chunk.signal.shape[0] == nominal_chunk_len:
             # f, p = welch(chunk.signal, fs=sample_rate, window="hann", axis=0)
             p = _fastPeriodogram(
@@ -292,9 +288,6 @@ def _prepPass(cfg: dict):
                 psd_freqs = freqs
             psd_sum += p
             psd_count += 1
-
-        print("6: ", time.perf_counter() - t)
-        t = time.perf_counter()
 
         # stop time is from last chunk
         t_obs_stop = chunk.t_stop

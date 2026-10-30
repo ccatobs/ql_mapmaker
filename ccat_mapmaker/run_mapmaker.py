@@ -195,14 +195,14 @@ def _prepPass(cfg: dict):
         if cfg['total_chunks'] is not None:
             _printLoadingBar(i, cfg['total_chunks'], length=40)
 
-        print(time.perf_counter() - t)
+        print("1: ", time.perf_counter() - t)
         t = time.perf_counter()
 
         # Skip chunks where all detector data is flagged out
         if np.all(chunk.flags != 0):
             continue 
 
-        print(time.perf_counter() - t)
+        print("2: ", time.perf_counter() - t)
         t = time.perf_counter()
 
         # Initialize on first valid chunk
@@ -231,14 +231,14 @@ def _prepPass(cfg: dict):
         signal_masked = chunk.signal.astype(float, copy=True)
         signal_masked[chunk.flags != 0] = np.nan
 
-        print(time.perf_counter() - t)
+        print("3: ", time.perf_counter() - t)
         t = time.perf_counter()
 
         # Temporal differences and validity mask
         diffs = signal_masked[1:] - signal_masked[:-1]
         valid_mask = np.isfinite(diffs)
 
-        print(time.perf_counter() - t)
+        print("4: ", time.perf_counter() - t)
         t = time.perf_counter()
 
         # Advance accumulations
@@ -251,7 +251,7 @@ def _prepPass(cfg: dict):
         det_diff_count  += np.sum(valid_mask, axis=0)
         n_chunks        += 1
 
-        print(time.perf_counter() - t)
+        print("5: ", time.perf_counter() - t)
         t = time.perf_counter()
 
         # Sxx, adding per loop
@@ -263,7 +263,7 @@ def _prepPass(cfg: dict):
             psd_sum += p
             psd_count += 1
 
-        print(time.perf_counter() - t)
+        print("6: ", time.perf_counter() - t)
         t = time.perf_counter()
 
         # stop time is from last chunk

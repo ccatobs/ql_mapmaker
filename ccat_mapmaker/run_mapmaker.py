@@ -190,12 +190,20 @@ def _prepPass(cfg: dict):
     init = False
     for i,chunk in enumerate(reader.iter_chunks(cfg)): # chunk_id=chunk.chunk_index
 
+        t = time.perf_counter()
+
         if cfg['total_chunks'] is not None:
             _printLoadingBar(i, cfg['total_chunks'], length=40)
+
+        print(time.perf_counter() - t)
+        t = time.perf_counter()
 
         # Skip chunks where all detector data is flagged out
         if np.all(chunk.flags != 0):
             continue 
+
+        print(time.perf_counter() - t)
+        t = time.perf_counter()
 
         # Initialize on first valid chunk
         # ------------------------------------------------------ #
@@ -223,9 +231,15 @@ def _prepPass(cfg: dict):
         signal_masked = chunk.signal.astype(float, copy=True)
         signal_masked[chunk.flags != 0] = np.nan
 
+        print(time.perf_counter() - t)
+        t = time.perf_counter()
+
         # Temporal differences and validity mask
         diffs = signal_masked[1:] - signal_masked[:-1]
         valid_mask = np.isfinite(diffs)
+
+        print(time.perf_counter() - t)
+        t = time.perf_counter()
 
         # Advance accumulations
         ra_sum          += chunk.ra_bore.sum()
@@ -237,14 +251,20 @@ def _prepPass(cfg: dict):
         det_diff_count  += np.sum(valid_mask, axis=0)
         n_chunks        += 1
 
+        print(time.perf_counter() - t)
+        t = time.perf_counter()
+
         # Sxx, adding per loop
-        # if chunk.signal.shape[0] == nominal_chunk_len:
-        #     f, p = welch(chunk.signal, fs=sample_rate, window="hann", axis=0)
-        #     if psd_sum is None:
-        #         psd_sum = np.zeros_like(p)
-        #         psd_freqs = f
-        #     psd_sum += p
-        #     psd_count += 1
+        if chunk.signal.shape[0] == nominal_chunk_len:
+            f, p = welch(chunk.signal, fs=sample_rate, window="hann", axis=0)
+            if psd_sum is None:
+                psd_sum = np.zeros_like(p)
+                psd_freqs = f
+            psd_sum += p
+            psd_count += 1
+
+        print(time.perf_counter() - t)
+        t = time.perf_counter()
 
         # stop time is from last chunk
         t_obs_stop = chunk.t_stop

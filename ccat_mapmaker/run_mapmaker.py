@@ -190,20 +190,12 @@ def _prepPass(cfg: dict):
     init = False
     for i,chunk in enumerate(reader.iter_chunks(cfg)): # chunk_id=chunk.chunk_index
 
-        t = time.perf_counter()
-
         if cfg['total_chunks'] is not None:
             _printLoadingBar(i, cfg['total_chunks'], length=40)
-
-        print("1: ", time.perf_counter() - t)
-        t = time.perf_counter()
 
         # Skip chunks where all detector data is flagged out
         if np.all(chunk.flags != 0):
             continue 
-
-        print("2: ", time.perf_counter() - t)
-        t = time.perf_counter()
 
         # Initialize on first valid chunk
         # ------------------------------------------------------ #
@@ -231,21 +223,17 @@ def _prepPass(cfg: dict):
         signal_masked = chunk.signal.astype(float, copy=True)
         signal_masked[chunk.flags != 0] = np.nan
 
-        print("3: ", time.perf_counter() - t)
-        t = time.perf_counter()
-
         # Temporal differences and validity mask
         diffs = signal_masked[1:] - signal_masked[:-1]
         valid_mask = np.isfinite(diffs)
 
-        print("4: ", time.perf_counter() - t)
         t = time.perf_counter()
 
-        # Advance accumulations
+        # Advance accumulations (t=0.53 s)
         ra_sum          += chunk.ra_bore.sum()
         dec_sum         += chunk.dec_bore.sum()
         n_bore          += len(chunk.ra_bore)
-        det_median_sum  += np.nanmedian(chunk.signal, axis=0)
+        # det_median_sum  += np.nanmedian(chunk.signal, axis=0)
         det_diff_sum    += np.nansum(diffs, axis=0)
         det_diff_sum_sq += np.nansum((diffs ** 2), axis=0)
         det_diff_count  += np.sum(valid_mask, axis=0)
@@ -254,7 +242,7 @@ def _prepPass(cfg: dict):
         print("5: ", time.perf_counter() - t)
         t = time.perf_counter()
 
-        # Sxx, adding per loop
+        # Sxx, adding per loop (t=0.16 s)
         if chunk.signal.shape[0] == nominal_chunk_len:
             f, p = welch(chunk.signal, fs=sample_rate, window="hann", axis=0)
             if psd_sum is None:

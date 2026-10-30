@@ -114,7 +114,7 @@ def _setupProfiler(args):
 
 # ============================================================================ #
 # _printLoadingBar
-def _printLoadingBar(iteration, total, length=40):
+def _printLoadingBar(iteration=1, total=1, length=40, clear=False):
     """Prints an in-place updating loading bar to stdout, clearing the line upon completion.
 
     Args:
@@ -123,16 +123,17 @@ def _printLoadingBar(iteration, total, length=40):
         length (int, optional): Character length of the progress bar. Defaults to 40.
     """
 
-    if iteration < total:
-        percent = (iteration / total) * 100
-        filled_length = int(length * iteration // total)
-        bar = '█' * filled_length + '-' * (length - filled_length)
-        sys.stdout.write(f'\r|{bar}| {percent:.1f}% Complete')
-        sys.stdout.flush()
-    else:
+    if clear:
         line_width = length + 18
         sys.stdout.write(f'\r{" " * line_width}\r')
         sys.stdout.flush()
+        return
+
+    percent = (iteration / total) * 100
+    filled_length = int(length * iteration // total)
+    bar = '█' * filled_length + '-' * (length - filled_length)
+    sys.stdout.write(f'\r|{bar}| {percent:.1f}% Complete')
+    sys.stdout.flush()
 
 
 # ============================================================================ #
@@ -248,6 +249,8 @@ def _firstPass(cfg: dict):
         # stop time is from last chunk
         t_obs_stop = chunk.t_stop
 
+    _printLoadingBar(clear=True)
+
     # Observation telemetry
     obs_info = reader.packObsInfo(
         t_obs_start, t_obs_stop, n_dets, sample_rate, n_chunks)
@@ -278,19 +281,6 @@ def _firstPass(cfg: dict):
     return state
 
 
-
-# ============================================================================ #
-# _streamingPass
-def _streamingPass(
-    cfgs: dict,
-    state_1: dict,
-    current_map: np.ndarray = None,
-    common_mode: bool = True,
-    return_sample: bool = False,
-    collect_tod_rms: bool = False,
-    weights: np.ndarray = None
-    ):
-  
     # cfg: dict, 
     # pipe_cfg: dict,
     # ra_edges: np.ndarray, 
@@ -305,6 +295,20 @@ def _streamingPass(
     # compute_time_null: bool = True,
     # compute_detsplit_null: bool = False,
     # weights: np.ndarray = None):
+
+# ============================================================================ #
+# _streamingPass
+def _streamingPass(
+    cfgs: dict,
+    state_1: dict,
+    current_map: np.ndarray = None,
+    common_mode: bool = True,
+    return_sample: bool = False,
+    collect_tod_rms: bool = False,
+    weights: np.ndarray = None
+    ):
+  
+    # TODO: loading bar?
 
     pipe_cfg = cfgs['pipeline']
     compute_time_null = pipe_cfg.get("compute_time_null", True)
@@ -341,7 +345,11 @@ def _streamingPass(
         "notch":       pipe_cfg.get("notch", {}),
     }
 
-    for chunk in reader.iter_chunks(cfgs):
+    for i,chunk in enumerate(reader.iter_chunks(cfgs)):
+
+        if cfgs['total_chunks'] is not None:
+            _printLoadingBar(i, cfgs['total_chunks'], length=40)
+
         flags = chunk.flags
         chunk_id = chunk.chunk_index
         if np.all(flags != 0):
@@ -429,6 +437,8 @@ def _streamingPass(
                 detsplit_data[dhalf] += d_ds
                 detsplit_hits[dhalf] += h_ds
 
+    _printLoadingBar(clear=True)
+
     with np.errstate(invalid='ignore', divide='ignore'):
         combined = np.where(total_hits > 0, total_data / total_hits, np.nan)
         mean_sq = np.where(total_hits > 0, total_sumsq / total_hits, np.nan)
@@ -458,9 +468,6 @@ def _streamingPass(
         'sample': sample,
         'tod_rms_data': tod_rms_data
     }
-
-    # return (combined, total_hits, noise_map, null_map, detsplit_null_map,
-    #         n_dets, sample_rate, sample, tod_rms_data)
 
 
 # ============================================================================ #
@@ -517,8 +524,8 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
 
 
 # ============================================================================ #
-# _step1
-def _step1(cfg: dict) -> dict:
+# _mapPrep
+def _mapPrep(cfg: dict) -> dict:
     """Orchestrates Step 1 of the mapmaking pipeline:
     1. Executes the first data pass to gather baselines, noise, and PSD.
     2. Determine excluded detectors.
@@ -527,7 +534,7 @@ def _step1(cfg: dict) -> dict:
     5. Sets up the spatial pixel grid edges.
     """
 
-    print(f"Step 1 (TOD stats, KID exclusions, map grid)")
+    print(f"Step 1 (preparation)")
 
     t0 = time.perf_counter()
     t = t0
@@ -607,16 +614,23 @@ def _step1(cfg: dict) -> dict:
 
 
 # ============================================================================ #
-# _step2
-def _step2(cfg: dict, state_1: dict) -> dict:
+# _makeMap
+def _makeMap(cfg: dict, state_1: dict) -> dict:
     """
+    1. Make a 'naive' first map
+    2. Make a more robust map:
+    - Common mode removed (1 pass).
+    - Hits map.
+    - Noise map.
+    - Null map (difference between two random samples of kids).
     """
 
-    print(f"Step 2")
+    print(f"Step 2 (map making)")
 
     pipe_cfg = cfg["pipeline"]
     chunk_s = pipe_cfg.get("chunk_duration_s", 1.0)
-    
+
+    # Make a 'naive' first map
     t = time.perf_counter()
     s_sp1 = _streamingPass( # state var
         cfg, state_1,
@@ -625,8 +639,15 @@ def _step2(cfg: dict, state_1: dict) -> dict:
     t1 = time.perf_counter() - t
 
     print(f"  Naive map (chunk_duration_s={chunk_s})")
-    print(f"    {s_sp1['n_dets']} detectors, {sr:.1f} Hz, [{t1:.1f}s]")
+    print(f"    {s_sp1['n_dets']} detectors"\
+          f", {s_sp1['sample_rate']:.1f} Hz, [{t1:.1f}s]")
 
+    # Make a more robust map:
+    # - Common mode removed (1 pass).
+    # - Hits map.
+    # - Noise map.
+    # - Null map (difference between two random samples of kids).
+    # TODO: null map needs to be separated from streaming pass and improved.
     t = time.perf_counter()
     s_sp2 = _streamingPass(
         cfg, state_1, 
@@ -899,18 +920,31 @@ def main():
 
     print(f"{'='*60}\nCCAT Quick-Look Mapmaker\n{'='*60}")
 
+    # SETUP
     t_total = time.perf_counter()
-
     args = _setupArgParser()
     prof = _setupProfiler(args)
     cfgs = _loadConfiguration(args.config)
     cfgs |= reader._precalcChunkTotal(cfgs) # if possible ("lab" only right now)
 
-    state_1 = _step1(cfgs)
+    # STEP 1: A single data pass to prepare for map making.
+    # - Executes the first data pass to gather baselines, noise, and PSD.
+    # - Determine excluded detectors.
+    # - Computes inverse-variance detector weights.
+    # - Resolves the map center.
+    # - Sets up the spatial pixel grid edges.
+    state_1 = _mapPrep(cfgs)
 
+    # STEP 2: Two data passes to build out the maps.
+    # - 'naive' first map.
+    # - Common mode removed map (1 pass).
+    # - Hits map.
+    # - Noise map.
+    # - Null map (difference between two random samples of kids).
+    state_2 = _makeMap(cfgs, state_1)
+
+    # TODO: audit streamer
     # TODO: audit from here
-
-    state_2 = _step2(cfgs, state_1)
 
     combined_map, cm_maps, pass_times = step_3_iterations(
         cfgs, state_1, state_2, kid_shifts)

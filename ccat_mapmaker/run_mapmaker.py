@@ -459,7 +459,7 @@ def _mapPass(
         # because I don't know what the flags are.
         sig, clean_flags = tod.cleanTod(
             sig, chunk.sample_rate, state_1['det_noise'], 
-            steps=cfgs.get('pipeline')
+            steps=cfgs.get('pipeline'))
         clean_flag_mask = np.where(clean_flags!=0, np.nan, flag_mask)
 
         # TODO: audit from here

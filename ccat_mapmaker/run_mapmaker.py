@@ -227,8 +227,8 @@ def _stridedMedian(sig, min_samples=100, axis=0):
     slices = [slice(None)] * sig.ndim
     slices[axis] = slice(None, None, stride_size)
 
-    # Nan aware median calculation, type casted to native float
-    med = float(np.nanmedian(sig[tuple(slices)], axis=axis))
+    # Nan aware median calculation
+    med = np.nanmedian(sig[tuple(slices)], axis=axis)
 
     return med
 

@@ -25,6 +25,7 @@ import os
 import io
 import sys
 import time
+import math
 import pstats
 import pathlib
 import argparse
@@ -198,6 +199,40 @@ def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarr
     return kids_sel, sel_idx
 
 
+# ============================================================================ #
+# _stridedMedian
+def _stridedMedian(sig, min_samples=100, axis=0):
+    """Compute a strided median along a specified axis for fast estimation.
+    Nan safe.
+
+    sig (array of floats): Input array containing the data stream.
+    min_samples (int): Minimum samples to use in median calculation.
+    axis (int): Axis along which the median is computed. Default is 0.
+
+    Returns:
+        (array of floats): Median array computed on the strided data.
+    """
+
+    # Total number of samples in the signal.
+    num_samples = sig.shape[axis]
+
+    # Fast stride calculation
+    def fastPowerOfTwo(n, min_samples):
+        if n <= min_samples:
+            return 1
+        return 1 << math.floor(math.log2(n/min_samples))
+    stride_size = fastPowerOfTwo(num_samples, min_samples)
+
+    # Dynamic stride slice along given axis
+    slices = [slice(None)] * sig.ndim
+    slices[axis] = slice(None, None, stride_size)
+
+    # Nan aware median calculation, type casted to native float
+    med = float(np.nanmedian(sig[tuple(slices)], axis=axis))
+
+    return med
+
+
 
 
 # ============================================================================ #
@@ -207,7 +242,7 @@ def _resolve_det_selection(all_kids: list, pd_cfg: dict) -> tuple[list, np.ndarr
 
 # ============================================================================ #
 # _prepPass
-def _prepPass(cfg: dict):
+def _prepPass(cfg: dict): 
     """Streaming loop over all data chunks to compute:
     - Boresight pointing averages (for map center fallback)
     - Per-detector medians and noise estimates (via temporal differences)
@@ -269,10 +304,10 @@ def _prepPass(cfg: dict):
         det_diff_count  += np.sum(valid_mask, axis=0)
         n_chunks        += 1
 
-        # The median calc is the major bottleneck (t=0.48 s).
-        # We are using a strided median instead to reduce computation.
-        # det_median_sum  += np.nanmedian(chunk.signal, axis=0)
-        det_median = np.nanmedian(chunk.signal[::4, :], axis=0)
+        # We are using a strided median to reduce computation.
+        # Dynamically determines stride size for statistical robustness.
+        # det_median = np.nanmedian(chunk.signal[::4, :], axis=0)
+        det_median = _stridedMedian(chunk.signal, axis=0)
         det_median_sum  += det_median
 
         # Sxx, adding per loop.
@@ -357,91 +392,80 @@ def _mapPass(
     boresight_only = False
     nx, ny = state_1['nx'], state_1['ny']
 
-    total_data = np.zeros((ny, nx), dtype=float)
-    total_hits = np.zeros((ny, nx), dtype=float)
-    total_sumsq = np.zeros((ny, nx), dtype=float)
+    # Excluded detectors
+    idx = state_1.get("keep_idx") or slice(None)
+    n_dets_kept = len(state_1["det_offsets_kept"])
 
-    null_map = None
-    if compute_time_null:
-        null_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
-        null_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
+    def zerosMap():
+        # float32 should be okay for ql maps?
+        return np.zeros((ny, nx), dtype=np.float32)
+    def zerosMapList(num=2):
+        return [zerosMap() for i in range(num)]
 
-    detsplit_null_map = None
-    if compute_detsplit_null:
-        n_dets_kept = len(state_1["det_offsets_kept"])
-        det_half = np.random.default_rng(0).integers(0, 2, size=n_dets_kept)
-        detsplit_data = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
-        detsplit_hits = [np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float)]
-
-    n_dets = sample_rate = None
+    # Initialize tracking variables
+    total_data = zerosMap()
+    total_hits = zerosMap()
+    total_sumsq = zerosMap()
+    null_data = zerosMapList() if compute_time_null else None
+    null_hits = zerosMapList() if compute_time_null else None
+    detsplit_data = zerosMapList() if compute_detsplit_null else None
+    detsplit_hits = zerosMapList() if compute_detsplit_null else None
+    det_half = np.random.default_rng(0).integers(0, 2, size=n_dets_kept)
     psd_raw = psd_cm = None
     tod_rms_data: list = []
 
-    # Configure cleaning steps used by clean_tod
-    clean_steps = pipe_cfg.get("clean_steps", [])
-    step_params = {
-        "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
-        "highpass":    pipe_cfg.get("highpass", {}),
-        "notch":       pipe_cfg.get("notch", {}),
-    }
-
+    init = False
     for i,chunk in enumerate(reader.iter_chunks(cfgs)):
+        chunk_id = chunk.chunk_index
 
         if cfgs['total_chunks'] is not None:
             _printLoadingBar(i, cfgs['total_chunks'], length=40)
 
-        flags = chunk.flags
-        chunk_id = chunk.chunk_index
-        if np.all(flags != 0):
+        # Skip chunks where all detector data is flagged out
+        if np.all(chunk.flags != 0):
             continue
-        if n_dets is None:
+
+        # Initialize on first valid chunk
+        # ------------------------------------------------------ #
+        if not init:
+
             n_dets = len(chunk.kids)
             sample_rate = chunk.sample_rate
 
-        ra = chunk.ra
-        dec = chunk.dec
-        flags = chunk.flags
-        no_per_detector_offsets = ra is None
+            init = True
+        # ------------------------------------------------------ #
 
-        if state_1["keep_idx"] is not None:
-            sig = chunk.signal[:, state_1["keep_idx"]] - state_1["det_offsets_kept"][np.newaxis, :]
-            flags = flags[:, state_1["keep_idx"]]
-            if ra is not None:
-                ra = ra[:, state_1["keep_idx"]]
-                dec = dec[:, state_1["keep_idx"]]
-        else:
-            sig = chunk.signal - state_1["det_offsets_kept"][np.newaxis, :]
+        # Timestreams (w/out excluded detectors)
+        sig = chunk.signal[:, idx]
+        ra, dec = chunk.ra[:, idx], chunk.dec[:, idx]
+        flags = chunk.flags[:, idx]
+        
+        # Subtract signal bias
+        sig -= state_1["det_offsets_kept"][np.newaxis, :]
 
-        flag_mask = np.ones(np.shape(flags))
-        flag_mask[flags != 0] = np.nan
-
+        # Use boresight w/out unique detector shifts
         if boresight_only or ra is None:
-            ra = np.repeat(chunk.ra_bore[:, np.newaxis], sig.shape[1], axis=1)
-            dec = np.repeat(chunk.dec_bore[:, np.newaxis], sig.shape[1], axis=1)
-            # ra = np.broadcast_to(chunk.ra_bore[:, np.newaxis], sig.shape) # maybe slightly faster
-            # dec = np.broadcast_to(chunk.dec_bore[:, np.newaxis], sig.shape)
+            ra = chunk.ra_bore[:, np.newaxis] + np.zeros(sig.shape[1])
+            dec = chunk.dec_bore[:, np.newaxis] + np.zeros(sig.shape[1])
 
-        if clean_steps:
-            sig, new_flags = tod.clean_tod(sig, flag_mask, chunk.sample_rate,
-                                       steps=clean_steps,
-                                       step_params=step_params)
-            if new_flags is None:
-                bin_flag_mask = flag_mask
-            else:
-                new_flags = np.asarray(new_flags)
-                if np.any(new_flags != 0):
-                    bin_flag_mask = flag_mask.copy()
-                    bin_flag_mask[new_flags != 0] = np.nan
-                else:
-                    bin_flag_mask = flag_mask
-        else:
-            new_flags = None
-            bin_flag_mask = flag_mask
+        # Build flag mask: 0->nan
+        flag_mask = np.where(flags!=0, np.nan, 1.0)
+
+        # Clean the timestreams (cosmic rays, gaps, etc.)
+        # Not using the flag_mask here 
+        # because I don't know what the flags are.
+        sig, clean_flags = tod.cleanTod(
+            sig, chunk.sample_rate, state_1['det_noise'], 
+            steps=cfgs.get['pipeline'])
+        clean_flag_mask = np.where(clean_flags!=0, np.nan, flag_mask)
+
+        # TODO: audit from here
 
         if return_sample and psd_raw is None:
             psd_raw = sig.copy()
 
-        if collect_tod_rms:
+        if collect_tod_rms: # TODO: replace median strided form
+            # det_median = _stridedMedian(chunk.signal, axis=0)
             rms_raw = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0))))
 
         if common_mode:
@@ -454,11 +478,11 @@ def _mapPass(
         if return_sample and psd_cm is None:
             psd_cm = sig.copy() * flag_mask
 
-        if collect_tod_rms:
+        if collect_tod_rms: # TODO: replace median strided form
             rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
             tod_rms_data.append((chunk.t_start, rms_raw, rms_cm))
 
-        d, h, sq = map.bin_chunk(sig, bin_flag_mask, ra, dec, state_1["ra_edges"], state_1["dec_edges"], weights=weights)
+        d, h, sq = map.bin_chunk(sig, clean_flag_mask, ra, dec, state_1["ra_edges"], state_1["dec_edges"], weights=weights)
         total_data += d
         total_hits += h
         total_sumsq += sq
@@ -472,8 +496,8 @@ def _mapPass(
             for dhalf in (0, 1):
                 m = det_half == dhalf
                 w_half = weights[m] if weights is not None else None
-                d_ds, h_ds, _ = map.bin_chunk(sig[:, m], bin_flag_mask[:, m], ra[:, m], dec[:, m],
-                                          state_1["ra_edges"], state_1["dec_edges"], weights=w_half)
+                d_ds, h_ds, _ = map.bin_chunk(
+                    sig[:, m], clean_flag_mask[:, m], ra[:, m], dec[:, m], state_1["ra_edges"], state_1["dec_edges"], weights=w_half)
                 detsplit_data[dhalf] += d_ds
                 detsplit_hits[dhalf] += h_ds
 
@@ -485,11 +509,13 @@ def _mapPass(
         variance = np.clip(mean_sq - combined ** 2, 0, None)
         noise_map = np.sqrt(variance / total_hits)
 
+        null_map = None
         if compute_time_null:
-            map_a = np.where(null_hits[0] > 0, null_data[0] / null_hits[0], np.nan)
-            map_b = np.where(null_hits[1] > 0, null_data[1] / null_hits[1], np.nan)
+            map_a = np.where(null_hits[0]>0, null_data[0]/null_hits[0], np.nan)
+            map_b = np.where(null_hits[1]>0, null_data[1]/null_hits[1], np.nan)
             null_map = (map_a - map_b) / 2.0
 
+        detsplit_null_map = None
         if compute_detsplit_null:
             map_a_ds = np.where(detsplit_hits[0] > 0, detsplit_data[0] / detsplit_hits[0], np.nan)
             map_b_ds = np.where(detsplit_hits[1] > 0, detsplit_data[1] / detsplit_hits[1], np.nan)
@@ -534,13 +560,14 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
         flag_mask[flags != 0] = np.nan
         sig = chunk.signal - det_offsets[np.newaxis, :]
 
-        sig, new_flags = tod.clean_tod(sig, flag_mask, chunk.sample_rate,
-                                   steps=pipe_cfg.get("clean_steps", []),
-                                   step_params={
-                                       "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
-                                       "highpass": pipe_cfg.get("highpass", {}),
-                                       "notch": pipe_cfg.get("notch", {}),
-                                   })
+        sig, new_flags = tod.clean_tod(
+            sig, flag_mask, chunk.sample_rate, 
+            steps=pipe_cfg.get("clean_steps", []), 
+            step_params={
+                "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
+                "highpass": pipe_cfg.get("highpass", {}),
+                "notch": pipe_cfg.get("notch", {}),
+            })
 
         bin_flag_mask = np.where(new_flags != 0, np.nan, flag_mask)
 
@@ -601,6 +628,7 @@ def _mapPrep(cfg: dict) -> dict:
     # Find detector weights.
     # This uses a static weight per detector:
     # The inverse of the white noise floor (0.4 to 0.9 nyqist of PSD).
+    # TODO: this uses a median calc
     det_weights = tod.findWeights(
         s_fp['white_noise_floor'], len(s_fp['all_kids']), cfg["pipeline"])
 
@@ -629,6 +657,7 @@ def _mapPrep(cfg: dict) -> dict:
     # Return a dictionary containing all computed parameters for subsequent pipeline steps
     return {
         "det_offsets": s_fp['det_offsets'],
+        "det_noise": s_fp['det_noise'],
         "all_kids": s_fp['all_kids'],
         "obs_info": s_fp['obs_info'],
         "obs_utc": obs_utc,
@@ -666,6 +695,7 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
     """
 
     print(f"Step 2 (map making)")
+    # TODO: add prints
 
     pipe_cfg = cfg["pipeline"]
     chunk_s = pipe_cfg.get("chunk_duration_s", 1.0)
@@ -984,6 +1014,8 @@ def main():
     state_2 = _makeMaps(cfgs, state_1)
 
     # TODO: audit streamer
+    # audit iter_chunks
+    # audit 
     # TODO: audit from here
 
     combined_map, cm_maps, pass_times = step_3_iterations(

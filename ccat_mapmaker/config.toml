@@ -76,7 +76,7 @@ n_iterations = 6
 # "notch". Add/remove/reorder freely -- each step is self-contained, with its
 # own [pipeline.<step>] config block below; clean_tod() doesn't need touching
 # to add a new step in the future (e.g. step correction).
-clean_steps = ["highpass"]
+# clean_steps = ["highpass"]
 # fill_them_noise = noisy polynomial or linear
 # how many samples (likely 5 samples)
 # build array of sample noise in loading, take varying noise everytime we need it
@@ -121,34 +121,24 @@ weight_cap_factor = 5.0
 compute_time_null     = true
 compute_detsplit_null = true
 
-
 # ---------------------------------------------------------------- #
-#   pipeline.cosmic_rays
+# pipeline.cosmic_rays
 [pipeline.cosmic_rays]
-sigma = 3.5   # spike threshold, in units of sigma * std(tod)
-n     = 2     # samples masked on each side of a detected spike
-
-
-# ---------------------------------------------------------------- #
-#   pipeline.highpass
-[pipeline.highpass]
-# Cutoff (Hz). Removes atmospheric drift. Disable (0.0) for simulation
-# data -- no atmosphere, filter distorts point-source signal.
-cutoff_hz = 0.0
-
+sigma = 3.5 # Spike threshold, in units of sigma*std(tod).
+n = 2 # Samples masked on each side of a detected spike.
+max_width = 5 # Max spike width to be considered cosmic ray.
 
 # ---------------------------------------------------------------- #
-#   pipeline.notch
-[pipeline.notch]
-# Line-frequency (mains) pickup + harmonics -- cables run at either 50 Hz or
-# 60 Hz depending on site, plus harmonics of that fundamental.
-# freq_hz = 0 auto-detects the fundamental per chunk from the dominant PSD
-# peak in the 45-65 Hz band (handles either 50 Hz or 60 Hz without needing to
-# know which in advance); set explicitly (e.g. 60.0) to force a fixed value.
-freq_hz      = 0
-n_harmonics  = 5 # includes the fundamental as harmonic 1
-bandwidth_hz = 1.0 # width of each notch
+# pipeline.highpass
+# [pipeline.highpass]
+# cutoff_hz = 0.0
 
+# ---------------------------------------------------------------- #
+# pipeline.notch
+# [pipeline.notch]
+# freq_hz      = 60.0 # 50.0 at FYST
+# n_harmonics  = 5 # includes the fundamental as harmonic 1
+# bandwidth_hz = 1.0 # width of each notch
 
 # ---------------------------------------------------------------- #
 # output
@@ -157,7 +147,6 @@ output_dir = "output"
 obs_object = "RCW92"
 save_numpy = true
 save_png   = true
-
 
 # ---------------------------------------------------------------- #
 # per_detector

@@ -8,9 +8,11 @@
 # CCAT 2026
 # ============================================================================ #
 
+import time
 import numpy as np
-from scipy.signal import medfilt
 import scipy.fft as fft
+from scipy.signal import medfilt
+from scipy.interpolate import CubicSpline
 
 
 # Bit values for chunk.flags (see reader.py's Chunk docstring for the
@@ -18,6 +20,7 @@ import scipy.fft as fft
 # per new detection reason; consumers that don't care which reason should
 # still just test `flags != 0`.
 FLAG_COSMIC_RAY = 1 << 0
+GAP_FLAG = 1 << 1
 
 
 
@@ -341,6 +344,7 @@ def findWeights(
             
             # Cap extreme weights
             # prevents near-zero noise channels from dominating
+            # TODO: switch to strided median
             median_w = np.median(det_weights[finite_wnf])
             det_weights = np.clip(det_weights, 0, weight_cap_factor * median_w)
             det_weights[~finite_wnf] = median_w
@@ -349,233 +353,296 @@ def findWeights(
 
 
 # ============================================================================ #
-# remove_cosmic_rays
-def remove_cosmic_rays(tod_1d: np.ndarray, flag_mask: np.ndarray,
-                       sigma: float = 3.5,
-                       n: int = 2) -> tuple[np.ndarray, np.ndarray]:
+# _fillGapsWithCubicSplineNoise
+def _fillGapsWithCubicSplineNoise(
+        tod: np.ndarray, noise_stds: np.ndarray,
+        min_cubic_gap:int=4
+        ) -> tuple[np.ndarray, np.ndarray]:
+    """Fill bounded gaps in TOD with interpolation and detector-scaled noise.
+
+    tod (2D array of floats): TOD of shape `(n_samps, n_dets)`.
+    noise_stds (1D array of floats): Std of each detector TOD.
+    min_cubic_gap (int): Min consecutive NaNs to use a cubic spline.
+        Gaps shorter than this use linear interpolation.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: (filled_tod, flags), where original
+            gaps are marked with GAP_FLAG, including gaps that cannot be filled.
     """
-    Detect and interpolate over cosmic ray spikes in one detector's timestream.
 
-    Flags samples where the step to the next sample exceeds sigma * std(tod),
-    expands each flag by n samples on each side, then interpolates over flagged
-    regions from surrounding clean data.
+    if min_cubic_gap < 1:
+        raise ValueError("min_cubic_gap must be at least 1")
 
-    Returns (tod, mask),  mask is a (n_samps,) bool array marking every
-    sample the spike expansion covered, whether or not it could actually be
-    interpolated (e.g. too few valid neighbours), so callers can record the
-    detection even when the interpolation itself was skipped.
-    """
-    tod = tod_1d.copy()
+    n_samps, n_dets = tod.shape
+    new_flags = np.zeros((n_samps, n_dets), dtype=int)
 
-    dtod = np.diff(tod*flag_mask, append=tod[-1])
+    for det in range(n_dets):
+        missing = ~np.isfinite(tod[:, det])
+        new_flags[missing, det] = GAP_FLAG
+        if not np.any(missing):
+            continue
 
-    threshold    = np.nanstd((tod*flag_mask)) * sigma
-    spike_indices = np.where(np.abs(dtod) > threshold)[0] + 1
+        # Find contiguous missing runs without treating separated gaps as one.
+        edges = np.diff(np.r_[False, missing, False].astype(np.int8))
+        starts = np.flatnonzero(edges == 1)
+        ends = np.flatnonzero(edges == -1)
+        valid_indices = np.flatnonzero(~missing)
 
-    mask = np.zeros(len(tod), dtype=bool)
-    if len(spike_indices) == 0:
-        return tod, mask
+        for start, end in zip(starts, ends):
+            gap_indices = np.arange(start, end)
+            left_end = np.searchsorted(valid_indices, start)
+            right_start = np.searchsorted(valid_indices, end)
+            if left_end == 0 or right_start == valid_indices.size:
+                continue
 
-    for idx in spike_indices:
-        start = max(0, idx - n)
-        end   = min(len(tod), idx + n + 1)
-        mask[start:end] = True
+            left_anchors = valid_indices[max(0, left_end - 2):left_end]
+            right_anchors = valid_indices[right_start:right_start + 2]
+            left_idx = left_anchors[-1]
+            right_idx = right_anchors[0]
+            if end - start >= min_cubic_gap:
+                # Include up to two clean samples on either side to constrain
+                # the spline while keeping it local to this gap.
+                anchors = np.concatenate((left_anchors, right_anchors))
+                if anchors.size >= 3:
+                    interpolated = CubicSpline(
+                        anchors, tod[anchors, det])(gap_indices)
+                else:
+                    interpolated = np.interp(
+                        gap_indices,
+                        [left_idx, right_idx],
+                        [tod[left_idx, det], tod[right_idx, det]])
+            else:
+                interpolated = np.interp(
+                    gap_indices,
+                    [left_idx, right_idx],
+                    [tod[left_idx, det], tod[right_idx, det]])
 
-    valid = np.where(~mask)[0]
-    if len(valid) < 2:
-        return tod, mask
-    tod[mask] = np.interp(np.where(mask)[0], valid, tod[valid])
+            noise_std = noise_stds[det]
+            if np.isfinite(noise_std) and noise_std > 0:
+                interpolated += np.random.normal(
+                    loc=0.0, scale=noise_std, size=gap_indices.size)
+            tod[gap_indices, det] = interpolated
 
-    return tod, mask
+    return tod, new_flags
 
 
 # ============================================================================ #
-# highpass_filter
-def highpass_filter(tod_1d: np.ndarray,
-                    sample_rate: float,
-                    cutoff_hz: float) -> np.ndarray:
+# _removeCosmicRays
+def _removeCosmicRays(
+        tod: np.ndarray,
+        sigma: float = 3.5, max_width: int = 5, n: int = 2
+        ) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized cosmic ray removal.
+    TOD and mask have shape (n_samps, n_dets).
+    
+    tod (array of floats): Time-ordered data. We operate in-place.
+    flag_mask (array of ints): Boolean mask.
+    sigma (float): Threshold multiplier.
+    max_width (int): Maximum width in samples to be cosmic ray.
+    n (int): Extra samples to pad on each side of the detected spike.
+        
+    Returns:
+        tod_clean (array of floats): Interpolated TOD.
+        new_flags (array of int): Flag array marking cosmic ray regions.
     """
-    Remove slow variations below cutoff_hz via brick-wall FFT high-pass filter.
-    Set cutoff_hz <= 0 to disable.
+
+    n_samps, n_dets = tod.shape
+    new_flags = np.zeros((n_samps, n_dets), dtype=int)
+
+    # Compute time derivative
+    dtod = np.diff(tod, axis=0, prepend=tod[:1])
+
+    # Dynamic threshold per detector based on robust dispersion (or std)
+    threshold = np.std(tod, axis=0) * sigma
+
+    # Identify rising and falling edge candidates across all detectors
+    pos_spikes = dtod > threshold   # Leading edge
+    neg_spikes = dtod < -threshold  # Trailing edge
+
+    # Width check & masking per detector column
+    # to find opposite edges separated by <= max_width.
+    for col in range(n_dets):
+        p_idx = np.where(pos_spikes[:, col])[0]
+        if len(p_idx) == 0:
+            continue
+            
+        col_mask = np.zeros(n_samps, dtype=bool)
+        
+        # Match rising edges to subsequent falling edges within max_width
+        for idx in p_idx:
+            # Look ahead up to max_width for the corresponding drop
+            window_end = min(n_samps, idx + max_width + 1)
+            if np.any(neg_spikes[idx:window_end, col]):
+                # It's a narrow spike! Expand by n samples on both sides
+                start = max(0, idx - n)
+                end = min(n_samps, window_end + n)
+                col_mask[start:end] = True
+
+        if not np.any(col_mask):
+            continue
+
+        # Interpolate over flagged region using valid surrounding points
+        valid = np.where(~col_mask)[0]
+        if len(valid) >= 2:
+            flagged_indices = np.where(col_mask)[0]
+            tod[flagged_indices, col] = np.interp(
+                flagged_indices, valid, tod[valid, col])
+            new_flags[col_mask, col] = FLAG_COSMIC_RAY
+
+    return tod, new_flags
+
+
+# ============================================================================ #
+# _highpassFilter
+def _highpassFilter(
+        tod: np.ndarray,
+        sample_rate: float, cutoff_hz: float,
+        ) -> np.ndarray:
+    """Remove slow variations below cutoff_hz via FFT.
+    Assumes NaNs and gaps have already been removed/handled upstream.
+    All TODs have shape (n_samps, n_dets).
+
+    tod (array of floats): Time-ordered data. We operate in-place.
+    flag_mask (array of ints): Boolean mask.
+    sample_rate (float): Data sampling rate.
+    cutoff_hz (float): The highpass cutoff in Hz.
+
+    Returns:
+        tod (array of floats): Highpass filtered TOD.
+        new_flags (array of int): New flag array.
     """
+
     if cutoff_hz <= 0.0:
-        return tod_1d
-
-    tod_fft = fft.rfft(tod_1d)
-    freqs   = fft.rfftfreq(len(tod_1d), d=1.0 / sample_rate)
-    tod_fft[freqs < cutoff_hz] = 0.0
-    return fft.irfft(tod_fft, n=len(tod_1d))
-
-
-# ============================================================================ #
-# detect_line_freq
-# called in the notch filter function 
-def detect_line_freq(tod: np.ndarray, sample_rate: float,
-                     search_range_hz: tuple = (45.0, 65.0)) -> float:
-    """
-    Auto-detect the mains line frequency from the dominant narrow peak in
-    search_range_hz (default spans both 50 Hz and 60 Hz mains).
-
-    Uses the median power spectrum across all detectors, since line pickup is
-    common-mode (affects every channel), which is better than picking a
-    peak from any single noisy detector. Returns 0.0 if no peak is found
-    (e.g. too few samples to resolve the search band).
-    """
-    n_samps = tod.shape[0]
-    freqs   = fft.rfftfreq(n_samps, d=1.0 / sample_rate)
-    band    = (freqs >= search_range_hz[0]) & (freqs <= search_range_hz[1])
-    if not np.any(band):
-        return 0.0
-
-    power        = np.abs(fft.rfft(tod, axis=0)) ** 2
-    median_power = np.median(power[band, :], axis=1)
-    return float(freqs[band][np.argmax(median_power)])
-
-
-# ============================================================================ #
-# notch_filter
-def notch_filter(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
-                 freq_hz: float = 0.0,
-                 n_harmonics: int = 5,
-                 bandwidth_hz: float = 1.0) -> np.ndarray:
-    """
-    Remove line-frequency (mains) pickup and its harmonics via FFT notch
-    filtering on the full (n_samps, n_dets) array.
-
-    freq_hz <= 0 (default) auto-detects the fundamental per call from the
-    dominant peak in the 45-65 Hz band, so the same config works whether a
-    site's mains run at 50 Hz or 60 Hz. Set freq_hz explicitly (e.g. 60.0) to
-    force a fixed frequency instead. n_harmonics counts the fundamental as
-    harmonic 1; harmonics at or above the Nyquist frequency are skipped.
-    """
-    n_samps = tod.shape[0]
-
-    freq = freq_hz if freq_hz > 0.0 else detect_line_freq(tod, sample_rate)
-    if freq <= 0.0:
         return tod
 
-    ### Cannot handle Nan Values cleanly; NaN values are instead set to 0 ###
-    flags = flag_mask
-    flags[np.isnan(flag_mask)] = 0
-    tod_fft = fft.rfft(tod*flags, axis=0)
-    freqs   = fft.rfftfreq(n_samps, d=1.0 / sample_rate)
+    is_1d = tod.ndim == 1
+    if is_1d:
+        tod = tod[:, np.newaxis]
 
-    nyquist = sample_rate / 2.0
+    n_samps = tod.shape[0]
+
+    # Batch FFT along the time axis (axis=0)
+    tod_fft = fft.rfft(tod, axis=0)
+    freqs = fft.rfftfreq(n_samps, d=1.0 / sample_rate)
+
+    # Broadcast frequency mask across channels
+    mask = (freqs < cutoff_hz)[:, np.newaxis]
+    tod_fft[mask] = 0.0
+
+    # Inverse transform
+    filtered_tod = fft.irfft(tod_fft, n=n_samps, axis=0)
+
+    if is_1d:
+        filtered_tod = filtered_tod[:, 0]
+
+    return filtered_tod
+
+
+# ============================================================================ #
+# _notchFilter
+def _notchFilter(
+        tod: np.ndarray, 
+        sample_rate: float, freq_hz:float=60.0,
+        n_harmonics: int = 5, bandwidth_hz: float = 1.0
+        ) -> np.ndarray:
+    """Line-frequency notch filter.
+    Assumes NaNs and gaps have already been removed/handled upstream.
+    All TODs have shape (n_samps, n_dets).
+
+    tod (array of floats): TOD signal.
+    sample_rate (float): Sampling rate of timestream in Hz.
+    freq_hz (float): Fundamental frequency to notch out.
+    n_harmonics (int): Number of harmonics to remove (fundamental is 1).
+    bandwidth_hz (float): Width of the notch filter around each harmonic in Hz.
+
+    Returns:
+        (array of floats): Notch filtered TOD.
+    """
+
+    n_samps, n_dets = tod.shape
+
+    if freq_hz <= 0.0:
+        return tod
+
+    nyquist = sample_rate/2.0
+
+    # Transform clean TOD directly
+    tod_fft = fft.rfft(tod, axis=0)
+    freqs = fft.rfftfreq(n_samps, d=1.0 / sample_rate)
+
+    # Build frequency-domain notch mask
+    notch_mask = np.ones(tod_fft.shape[0], dtype=bool)
     for h in range(1, n_harmonics + 1):
-        f_h = freq * h
+        f_h = freq_hz * h
         if f_h >= nyquist:
             break
-        tod_fft[np.abs(freqs - f_h) <= bandwidth_hz / 2.0, :] = 0.0
+        notch_mask &= (np.abs(freqs - f_h) > bandwidth_hz / 2.0)
 
+    # Zero out spectral bins corresponding to mains pickup and harmonics
+    tod_fft[~notch_mask, :] = 0.0
+
+    # Transform back to the time domain
     return fft.irfft(tod_fft, n=n_samps, axis=0)
 
 
 # ============================================================================ #
-# _step_cosmic_rays
-# based on Chapin_2013 where they apply a step correction
-# in progress, and not tested
-def _step_cosmic_rays(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
-                      sigma: float = 3.5, n: int = 2) -> tuple[np.ndarray, np.ndarray]:
-    """CLEAN_STEPS wrapper: apply remove_cosmic_rays per detector."""
+# cleanTod
+def cleanTod(
+        tod:np.ndarray, 
+        sample_rate:float, det_noise:np.ndarray, steps:dict
+        ) -> tuple[np.ndarray, np.ndarray]:
+    """Apply a sequence of time-ordered data (TOD) cleaning steps in order.
+
+    tod (array of floats): Time-ordered data array of shape `(n_samps, n_dets)`.
+    sample_rate (float): Sampling rate of the TOD in Hz.
+    det_noise (1D array of floats): Std of each detector TOD.
+    steps (dict): Dictionary mapping step names 
+        (e.g., `'cosmic_rays'`, `'highpass'`, `'notch'`) 
+        to parameter dictionaries of keyword overrides. 
+        Steps omitted from the dictionary are skipped.
+    verbose (bool): Print statements.
+
+    Returns:
+        (tuple[np.ndarray, np.ndarray])
+            - tod_clean: The cleaned copy of the input TOD array.
+            - clean_flags: An integer bitmask array of shape `(n_samps, n_dets)` containing flags raised by the executed steps, OR'd across all steps (or zeros if no flags were raised). Does not include `flag_mask`.
+          
+    Note: Per-detector baseline removal and correlated noise removal are assumed to be handled externally prior to this call.
+    """
+
+    # Copy so return a separate TOD from input.
     tod_clean = tod.copy()
-    new_flags = np.zeros(tod.shape, dtype=int)
-    for i in range(tod_clean.shape[1]):
-        tod_clean[:, i], mask = remove_cosmic_rays(tod_clean[:, i], flag_mask[:, i],
-                                                    sigma=sigma, n=n)
-        new_flags[mask, i] = FLAG_COSMIC_RAY
-    return tod_clean, new_flags
 
+    clean_flags = np.zeros(tod.shape, dtype=int)
 
-# ============================================================================ #
-# _step_highpass
-def _step_highpass(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
-                   cutoff_hz: float = 0.5) -> tuple[np.ndarray, None]:
-    """CLEAN_STEPS wrapper: brick-wall high-pass filter across the full array."""
-    if cutoff_hz <= 0.0:
-        return tod, None
+    # Fill gaps with cubic spline + noise
+    t = time.perf_counter()
+    tod_clean, step_flags = _fillGapsWithCubicSplineNoise(tod_clean, det_noise)
+    clean_flags |= step_flags
+    print(f"  Gap filling done. [{time.perf_counter()-t:.1f} s]")
 
-    n_samps = tod.shape[0]
-    ### Cannot handle Nan Values cleanly; NaN values are instead set to 0 ###
-    flags = flag_mask
-    flags[np.isnan(flag_mask)] = 0
-    tod_fft = fft.rfft(tod*flags, axis=0)
-    freqs   = fft.rfftfreq(n_samps, d=1.0 / sample_rate)
-    tod_fft[freqs < cutoff_hz, :] = 0.0
-    return fft.irfft(tod_fft, n=n_samps, axis=0), None
+    # Remove cosmic ray spikes.
+    if (params := steps.get('cosmic_rays')) is not None:
+        t = time.perf_counter()
+        tod_clean, step_flags = _removeCosmicRays(tod_clean, **params)
+        clean_flags |= step_flags
+        print(f"  Cosmic ray despiking done. [{time.perf_counter()-t:.1f} s]")
 
+    # Apply a high pass filter.
+    # Affects entire TOD, so nothing to flag?
+    if (params := steps.get('highpass')) is not None:
+        t = time.perf_counter()
+        tod_clean = _highpassFilter(tod, sample_rate, **params)
+        print(f"  High pass filter done. [{time.perf_counter()-t:.1f} s]")
 
-# ============================================================================ #
-# _step_notch
-def _step_notch(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
-                freq_hz: float = 0.0, n_harmonics: int = 5,
-                bandwidth_hz: float = 1.0) -> tuple[np.ndarray, None]:
-    """CLEAN_STEPS wrapper: line-frequency notch filter, see notch_filter()."""
-    return notch_filter(tod, flag_mask, sample_rate,
-                        freq_hz=freq_hz, n_harmonics=n_harmonics,
-                        bandwidth_hz=bandwidth_hz), None
+    # Apply the notch filter.
+    # Affects entire TOD, so nothing to flag?
+    if (params := steps.get('notch')) is not None:
+        t = time.perf_counter()
+        tod_clean = _notchFilter(tod_clean, sample_rate, **params)
+        print(f"  Notch filter done. [{time.perf_counter()-t:.1f} s]")
 
-
-CLEAN_STEPS = {
-    "cosmic_rays": _step_cosmic_rays,
-    "highpass":    _step_highpass,
-    "notch":       _step_notch,
-}
-
-
-# ============================================================================ #
-# clean_tod
-def clean_tod(tod: np.ndarray, flag_mask: np.ndarray, sample_rate: float,
-              steps: list, step_params: dict | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Apply the named cleaning steps to a full (n_samps, n_dets) array, in order.
-
-    steps is an ordered list of names from CLEAN_STEPS (e.g.
-    ["cosmic_rays", "highpass", "notch"]); step_params optionally maps each
-    name to a dict of keyword overrides for that step. Unlisted steps are
-    skipped entirely.
-
-    Per-detector baseline removal is handled before this call. Correlated
-    noise removal is handled by common_mode.py.
-
-    Returns (tod_clean, new_flags). new_flags is a (n_samps, n_dets) int
-    bitmask of reasons detected by the steps that ran (e.g. FLAG_COSMIC_RAY),
-    OR'd across all steps,  0 everywhere if none of the ran steps detect
-    anything (e.g. highpass/notch, which are filters, not detectors). This is
-    NOT the same array as flag_mask that was passed in, flag_mask isn't
-    modified, so the caller decides where the new flags get used (e.g. only
-    for map binning, not fed back into this same cleaning pass).
-    """
-    step_params = step_params or {}
-    tod_clean = tod.copy()
-    new_flags = np.zeros(tod.shape, dtype=int)
-
-    for name in steps:
-        if name not in CLEAN_STEPS:
-            raise ValueError(f"Unknown cleaning step {name!r}; available: {sorted(CLEAN_STEPS)}")
-        tod_clean, step_flags = CLEAN_STEPS[name](tod_clean, flag_mask, sample_rate,
-                                                   **step_params.get(name, {}))
-        if step_flags is not None:
-            new_flags |= step_flags
-
-    return tod_clean, new_flags
-
-
-# ============================================================================ #
-# normalize_tod
-def normalize_tod(tod_1d: np.ndarray, cal_lamp_tod_1d: np.ndarray) -> np.ndarray:
-    """
-    Normalise a detector timestream so the median is 0 and the cal lamp peak is 1.
-    Removes DC offset and puts all detectors on the same scale regardless of individual sensitivity differences.
-    """
-    # TODO: This should NOT be used except with BLAST-TNG data!
-    median_val = np.median(tod_1d)
-    cal_peak   = np.max(cal_lamp_tod_1d)
-
-    scale = cal_peak - median_val
-    if scale == 0:
-        return np.zeros_like(tod_1d)
-
-    return (tod_1d - median_val) / scale
+    return tod_clean, clean_flags
 
 
 

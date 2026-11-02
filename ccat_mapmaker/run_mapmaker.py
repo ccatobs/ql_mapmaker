@@ -393,7 +393,9 @@ def _mapPass(
     nx, ny = state_1['nx'], state_1['ny']
 
     # Excluded detectors
-    idx = state_1.get("keep_idx") or slice(None)
+    idx = state_1.get("keep_idx") 
+    if idx is None:
+        idx = slice(None)
     n_dets_kept = len(state_1["det_offsets_kept"])
 
     def zerosMap():

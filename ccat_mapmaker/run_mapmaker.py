@@ -439,7 +439,8 @@ def _mapPass(
 
         # Timestreams (w/out excluded detectors)
         sig = chunk.signal[:, idx]
-        ra, dec = chunk.ra[:, idx], chunk.dec[:, idx]
+        ra = chunk.ra[:, idx] if chunk.ra is not None else None
+        dec = chunk.dec[:, idx] if chunk.dec is not None else None
         flags = chunk.flags[:, idx]
         
         # Subtract signal bias

@@ -381,8 +381,6 @@ def _mapPass(
     state_1: dict,
     current_map: np.ndarray = None,
     common_mode: bool = True,
-    return_sample: bool = False,
-    collect_tod_rms: bool = False,
     weights: np.ndarray = None
     ):
 
@@ -462,28 +460,14 @@ def _mapPass(
             steps=cfgs.get('pipeline'))
         clean_flag_mask = np.where(clean_flags!=0, np.nan, flag_mask)
 
-        # TODO: audit from here
-
-        if return_sample and psd_raw is None:
-            psd_raw = sig.copy()
-
-        if collect_tod_rms: # TODO: replace median strided form
-            # det_median = _stridedMedian(chunk.signal, axis=0)
-            rms_raw = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0))))
-
+        # Common mode subtraction
         if common_mode:
-            if current_map is not None:
-                sig = tod.iterate_common_mode(sig, flag_mask, ra, dec,
-                                          current_map, state_1["ra_edges"], state_1["dec_edges"])
-            else:
-                sig = tod.subtract_common_mode(sig, tod.estimate_common_mode(sig, flag_mask))
+            sig = tod.subtractCommonMode(
+                sig, flag_mask, 
+                ra, dec, state_1["ra_edges"], state_1["dec_edges"],
+                current_map)
 
-        if return_sample and psd_cm is None:
-            psd_cm = sig.copy() * flag_mask
-
-        if collect_tod_rms: # TODO: replace median strided form
-            rms_cm = float(np.median(np.sqrt(np.mean(sig ** 2, axis=0)))) if common_mode else rms_raw
-            tod_rms_data.append((chunk.t_start, rms_raw, rms_cm))
+        # TODO: audit from here
 
         d, h, sq = map.bin_chunk(sig, clean_flag_mask, ra, dec, state_1["ra_edges"], state_1["dec_edges"], weights=weights)
         total_data += d
@@ -523,8 +507,6 @@ def _mapPass(
             map_a_ds = np.where(detsplit_hits[0] > 0, detsplit_data[0] / detsplit_hits[0], np.nan)
             map_b_ds = np.where(detsplit_hits[1] > 0, detsplit_data[1] / detsplit_hits[1], np.nan)
             detsplit_null_map = (map_a_ds - map_b_ds) / 2.0
-
-    sample = {"raw": psd_raw, "cm": psd_cm} if return_sample else None
 
     return {
         'combined': combined,
@@ -697,8 +679,9 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
     - Null map (difference between two random samples of kids).
     """
 
+    # TODO: timing profile
+
     print(f"Step 2 (map making)")
-    # TODO: add prints
 
     pipe_cfg = cfg["pipeline"]
     chunk_s = pipe_cfg.get("chunk_duration_s", 1.0)

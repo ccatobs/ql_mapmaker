@@ -69,7 +69,7 @@ time_chunk_size = 0
 
 # Common-mode subtraction iterations after the naive map.
 # 0 = naive map only, 3-5 = good balance of quality vs runtime.
-n_iterations = 6
+n_iterations = 4
 
 # Ordered list of cleaning steps applied to each chunk's timestream (see
 # mapmaker/cleaning.py CLEAN_STEPS). Available: "cosmic_rays", "highpass",

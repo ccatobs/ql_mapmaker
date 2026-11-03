@@ -8,6 +8,7 @@
 # CCAT 2026
 # ============================================================================ #
 
+from functools import lru_cache
 import time
 import numpy as np
 import scipy.fft as fft
@@ -354,6 +355,36 @@ def findWeights(
 
 # ============================================================================ #
 # _fillGapsWithCubicSplineNoise
+@lru_cache(maxsize=256)
+def _cubic_gap_weights(
+        gap_length: int, anchor_offsets: tuple[int, ...]
+        ) -> np.ndarray:
+    """Return cubic interpolation weights for a gap's relative geometry."""
+    anchors = np.asarray(anchor_offsets, dtype=float)
+    positions = np.arange(gap_length, dtype=float)
+    weights = np.ones((gap_length, anchors.size), dtype=float)
+    for j in range(anchors.size):
+        for k in range(anchors.size):
+            if j != k:
+                weights[:, j] *= (
+                    (positions - anchors[k]) / (anchors[j] - anchors[k]))
+    weights.setflags(write=False)
+    return weights
+
+
+def _interpolate_cubic_gap(
+        tod: np.ndarray, det: int, anchors: np.ndarray,
+        start: int, end: int
+        ) -> np.ndarray:
+    gap_length = end - start
+    if gap_length <= 256:
+        weights = _cubic_gap_weights(
+            gap_length, tuple((anchors - start).tolist()))
+        return weights @ tod[anchors, det]
+    return CubicSpline(
+        anchors, tod[anchors, det])(np.arange(start, end))
+
+
 def _fillGapsWithCubicSplineNoise(
         tod: np.ndarray, noise_stds: np.ndarray,
         min_cubic_gap:int=4
@@ -372,56 +403,100 @@ def _fillGapsWithCubicSplineNoise(
 
     if min_cubic_gap < 1:
         raise ValueError("min_cubic_gap must be at least 1")
-
     n_samps, n_dets = tod.shape
     new_flags = np.zeros((n_samps, n_dets), dtype=int)
+    missing_samples = ~np.isfinite(tod)
+    new_flags[missing_samples] = GAP_FLAG
+    detectors_with_gaps = np.flatnonzero(np.any(missing_samples, axis=0))
 
-    for det in range(n_dets):
-        missing = ~np.isfinite(tod[:, det])
-        new_flags[missing, det] = GAP_FLAG
-        if not np.any(missing):
-            continue
-
-        # Find contiguous missing runs without treating separated gaps as one.
+    for det in detectors_with_gaps:
+        missing = missing_samples[:, det]
         edges = np.diff(np.r_[False, missing, False].astype(np.int8))
         starts = np.flatnonzero(edges == 1)
         ends = np.flatnonzero(edges == -1)
         valid_indices = np.flatnonzero(~missing)
+        if valid_indices.size == 0:
+            continue
+
+        noise_std = noise_stds[det]
+        noise_gaps = (
+            [] if np.isfinite(noise_std) and noise_std > 0 else None)
+
+        # Per-gap work is cheaper when a detector has only a few gaps.
+        if starts.size <= 8:
+            for start, end in zip(starts, ends):
+                left_end = np.searchsorted(valid_indices, start)
+                right_start = np.searchsorted(valid_indices, end)
+                if left_end == 0 or right_start == valid_indices.size:
+                    continue
+
+                gap_indices = np.arange(start, end)
+                left_anchors = valid_indices[max(0, left_end - 2):left_end]
+                right_anchors = valid_indices[right_start:right_start + 2]
+                left_idx = left_anchors[-1]
+                right_idx = right_anchors[0]
+                gap_length = end - start
+                if gap_length >= min_cubic_gap:
+                    anchors = np.concatenate((left_anchors, right_anchors))
+                    if anchors.size >= 3:
+                        interpolated = _interpolate_cubic_gap(
+                            tod, det, anchors, start, end)
+                    else:
+                        fraction = (
+                            (gap_indices - left_idx) / (right_idx - left_idx))
+                        interpolated = (
+                            tod[left_idx, det] + fraction *
+                            (tod[right_idx, det] - tod[left_idx, det]))
+                else:
+                    fraction = (
+                        (gap_indices - left_idx) / (right_idx - left_idx))
+                    interpolated = (
+                        tod[left_idx, det] + fraction *
+                        (tod[right_idx, det] - tod[left_idx, det]))
+                if noise_gaps is not None:
+                    noise_gaps.append(gap_indices)
+                tod[gap_indices, det] = interpolated
+            if noise_gaps:
+                noise_indices = np.concatenate(noise_gaps)
+                tod[noise_indices, det] += np.random.normal(
+                    loc=0.0, scale=noise_std, size=noise_indices.size)
+            continue
+
+        sample_indices = np.arange(n_samps)
+        left_indices = np.maximum.accumulate(
+            np.where(~missing, sample_indices, -1))
+        right_indices = np.minimum.accumulate(
+            np.where(~missing, sample_indices, n_samps)[::-1])[::-1]
+        fillable = missing & (left_indices >= 0) & (right_indices < n_samps)
+        fill_indices = np.flatnonzero(fillable)
+        left = left_indices[fill_indices]
+        right = right_indices[fill_indices]
+        fraction = (fill_indices - left) / (right - left)
+        tod[fill_indices, det] = (
+            tod[left, det] + fraction * (tod[right, det] - tod[left, det]))
 
         for start, end in zip(starts, ends):
-            gap_indices = np.arange(start, end)
             left_end = np.searchsorted(valid_indices, start)
             right_start = np.searchsorted(valid_indices, end)
             if left_end == 0 or right_start == valid_indices.size:
                 continue
 
+            gap_length = end - start
+            if gap_length < min_cubic_gap:
+                continue
             left_anchors = valid_indices[max(0, left_end - 2):left_end]
             right_anchors = valid_indices[right_start:right_start + 2]
-            left_idx = left_anchors[-1]
-            right_idx = right_anchors[0]
-            if end - start >= min_cubic_gap:
-                # Include up to two clean samples on either side to constrain
-                # the spline while keeping it local to this gap.
-                anchors = np.concatenate((left_anchors, right_anchors))
-                if anchors.size >= 3:
-                    interpolated = CubicSpline(
-                        anchors, tod[anchors, det])(gap_indices)
-                else:
-                    interpolated = np.interp(
-                        gap_indices,
-                        [left_idx, right_idx],
-                        [tod[left_idx, det], tod[right_idx, det]])
-            else:
-                interpolated = np.interp(
-                    gap_indices,
-                    [left_idx, right_idx],
-                    [tod[left_idx, det], tod[right_idx, det]])
+            anchors = np.concatenate((left_anchors, right_anchors))
+            if anchors.size < 3:
+                continue
 
-            noise_std = noise_stds[det]
-            if np.isfinite(noise_std) and noise_std > 0:
-                interpolated += np.random.normal(
-                    loc=0.0, scale=noise_std, size=gap_indices.size)
-            tod[gap_indices, det] = interpolated
+            interpolated = _interpolate_cubic_gap(
+                tod, det, anchors, start, end)
+            tod[start:end, det] = interpolated
+
+        if fill_indices.size and np.isfinite(noise_std) and noise_std > 0:
+            tod[fill_indices, det] += np.random.normal(
+                loc=0.0, scale=noise_std, size=fill_indices.size)
 
     return tod, new_flags
 

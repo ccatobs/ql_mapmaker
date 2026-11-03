@@ -518,8 +518,8 @@ def _mapPass(
 
     # Create the total maps
     with np.errstate(invalid='ignore', divide='ignore'):
-        combined = np.where(total_hits > 0, total_data / total_hits, np.nan)
-        mean_sq = np.where(total_hits > 0, total_sumsq / total_hits, np.nan)
+        combined = np.where(total_hits>0, total_data/total_hits, np.nan)
+        mean_sq = np.where(total_hits>0, total_sumsq/total_hits, np.nan)
         variance = np.clip(mean_sq - combined ** 2, 0, None)
         noise_map = np.sqrt(variance / total_hits)
 
@@ -530,12 +530,13 @@ def _mapPass(
         null_map = compute_null(null_hits, null_data) if compute_time_null else None
         detsplit_null_map = compute_null(detsplit_hits, detsplit_data) if compute_detsplit_null else None
 
+        naive = None
+        if also_naive:
+            naive = np.where(naive_hits>0, naive_data/naive_hits, np.nan)
+
     return {
         'combined': combined,
-        'naive': (
-            np.where(naive_hits > 0, naive_data / naive_hits, np.nan)
-            if also_naive else None
-        ),
+        'naive': naive,
         'total_hits': total_hits,
         'noise_map': noise_map,
         'null_map': null_map,
@@ -632,7 +633,7 @@ def _mapPrep(cfg: dict) -> dict:
         s_fp['all_kids'], s_fp['det_noise'], 
         s_fp['white_noise_floor'], cfg["pipeline"])
 
-    print(f" | Using {len(s_de['keep_idx'])}/{len(s_de['keep_idx'])+len(s_de['exclude_set'])} detectors")
+    print(f" | Using {len(s_de['keep_idx'])}/{len(s_fp['all_kids'])} detectors")
 
     # Find detector weights.
     # This uses a static weight per detector:
@@ -715,7 +716,7 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
     initial_pass_time = time.perf_counter() - t
 
     print(f" | Naive + initial common-mode maps (chunk_duration_s={chunk_s})")
-    print(f"    {s_sp['n_dets']} detectors"\
+    print(f" | {s_sp['n_dets']} detectors"\
           f", {s_sp['sample_rate']:.1f} Hz, [{initial_pass_time:.1f}s]")
 
     return {
@@ -732,7 +733,7 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
 
 
 # ============================================================================ #
-#   _makeIterativeMaps
+# _makeIterativeMaps
 def _makeIterativeMaps(
         cfg: dict, state_1: dict, state_2: dict
         ) -> tuple[np.ndarray, list, list]:
@@ -748,21 +749,19 @@ def _makeIterativeMaps(
 
     if n_iters > 0:
 
-        print(f"Step 3: {n_iters} iteration(s)...")
+        print(f"Step 3: ({n_iters} iteration(s))")
 
         for i in range(1, n_iters + 1):
             t = time.perf_counter()
-
-            print(f" | Iteration {i}/{n_iters}...", end=" ", flush=True)
 
             s_sp = _mapPass(
                 cfg, state_1, weights=state_1["det_weights_kept"],
                 current_map=combined_map,
                 also_naive=True)
-            combined_map = s_sp['combined_map']
+            combined_map = s_sp['combined']
 
             t_iter = time.perf_counter() - t
-            print(f"[{t_iter:.1f}s]")
+            print(f" | Iteration {i}/{n_iters} [{t_iter:.1f}s]")
 
             cm_maps.append((f"it_{i}", combined_map.copy()))
             pass_times.append((f"it_{i}", t_iter))

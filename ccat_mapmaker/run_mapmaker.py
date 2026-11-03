@@ -622,7 +622,7 @@ def _mapPrep(cfg: dict) -> dict:
     # - Average PSD and white noise floor characteristics.
     s_fp = _prepPass(cfg) # state var
 
-    print(f"  First pass done. [{time.perf_counter()-t:.1f} s]")
+    print(f" | First pass done. [{time.perf_counter()-t:.1f} s]")
     t = time.perf_counter()
 
     # Decide which detectors to excluded from maps, based on:
@@ -631,6 +631,8 @@ def _mapPrep(cfg: dict) -> dict:
     s_de = tod.excludedDetectors( # detector state
         s_fp['all_kids'], s_fp['det_noise'], 
         s_fp['white_noise_floor'], cfg["pipeline"])
+
+    print(f" | Using {len(s_fp['keep_idx'])}/{s_fp['keep_idx']+s_fp['exclude_set']} detectors")
 
     # Find detector weights.
     # This uses a static weight per detector:
@@ -642,9 +644,9 @@ def _mapPrep(cfg: dict) -> dict:
     # Format observation time metadata for logging
     _G3_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
     obs_utc = _G3_EPOCH + timedelta(seconds=s_fp['obs_info']["t_start_g3s"])
-    print(f"  Obs start: {obs_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    print(f"  Duration: {s_fp['obs_info']['duration_s']:.1f} s")
-    print(f"  Detectors: {s_fp['obs_info']['n_detectors']} @ {s_fp['obs_info']['sample_rate_hz']:.1f} Hz")
+    print(f" | Obs start: {obs_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print(f" | Duration: {s_fp['obs_info']['duration_s']:.1f} s")
+    print(f" | Detectors: {s_fp['obs_info']['n_detectors']} @ {s_fp['obs_info']['sample_rate_hz']:.1f} Hz")
 
     # Determine the central RA/Dec coordinate for the map grid
     s_ma = coord.resolveMapCenter( # map state
@@ -657,7 +659,7 @@ def _mapPrep(cfg: dict) -> dict:
         res_deg=cfg["map"]["res_arcmin"]/60.0,
     )
 
-    print(f"  Map grid: {s_ma['ny']} x {s_ma['nx']} pixels", end="")
+    print(f" | Map grid: {s_ma['ny']} x {s_ma['nx']} pixels", end="")
     print(f" ({cfg['map']['res_arcmin']:.1f} arcmin/pixel)", end="")
     print(f", centre = ({s_ma['ra0_deg']:.4f}, {s_ma['dec0_deg']:.4f}) [{s_ma['centre_source']}]")
 
@@ -701,8 +703,6 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
     - Null map (difference between two random samples of kids).
     """
 
-    # TODO: timing profile
-
     print(f"Step 2 (map making)")
 
     pipe_cfg = cfg["pipeline"]
@@ -714,7 +714,7 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
         cfg, state_1, weights=state_1["det_weights_kept"], also_naive=True)
     initial_pass_time = time.perf_counter() - t
 
-    print(f"  Naive + initial common-mode maps (chunk_duration_s={chunk_s})")
+    print(f" | Naive + initial common-mode maps (chunk_duration_s={chunk_s})")
     print(f"    {s_sp['n_dets']} detectors"\
           f", {s_sp['sample_rate']:.1f} Hz, [{initial_pass_time:.1f}s]")
 
@@ -732,35 +732,49 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
 
 
 # ============================================================================ #
-#   step_3_iterations
-def step_3_iterations(cfg: dict, step1_res: dict, step2_res: dict, kid_shifts: dict | None) -> tuple[np.ndarray, list, list]:
+#   _makeIterativeMaps
+def _makeIterativeMaps(
+        cfg: dict, state_1: dict, state_2: dict
+        ) -> tuple[np.ndarray, list, list]:
+    """
+    """
+
     pipe_cfg = cfg["pipeline"]
     n_iters = pipe_cfg["n_iterations"]
-    combined_map = step2_res["combined_map"]
+    combined_map = state_2["combined_map"]
 
     cm_maps = [("it_0", combined_map.copy())]
-    pass_times = [("naive + it_0", step2_res["t_initial"])]
+    pass_times = [("naive + it_0", state_2["t_initial"])]
 
     if n_iters > 0:
+
         print(f"Step 3: {n_iters} iteration(s)...")
+
         for i in range(1, n_iters + 1):
             t = time.perf_counter()
-            print(f"  Iteration {i}/{n_iters}...", end=" ", flush=True)
-            combined_map, _, _, _, _, _, _, _, _ = _streaming_pass(
-                cfg, pipe_cfg, step1_res["ra_edges"], step1_res["dec_edges"],
-                step1_res["det_offsets_kept"], current_map=combined_map,
-                keep_idx=step1_res["keep_idx"], kids_kept=step1_res["kids_kept"],
-                kid_shifts=kid_shifts, weights=step1_res["det_weights_kept"],
-                compute_time_null=pipe_cfg.get("compute_time_null", True),
-            )
+
+            print(f" | Iteration {i}/{n_iters}...", end=" ", flush=True)
+
+            s_sp = _mapPass(
+                cfg, state_1, weights=state_1["det_weights_kept"],
+                current_map=combined_map,
+                also_naive=True)
+            combined_map = s_sp['combined_map']
+
             t_iter = time.perf_counter() - t
+            print(f"[{t_iter:.1f}s]")
+
             cm_maps.append((f"it_{i}", combined_map.copy()))
             pass_times.append((f"it_{i}", t_iter))
-            print(f"[{t_iter:.1f}s]")
+
     else:
         print("Step 3: Skipping (n_iterations = 0).")
 
-    return combined_map, cm_maps, pass_times
+    return {
+        'combined_map': combined_map,
+        'cm_maps': cm_maps,
+        'pass_times': pass_times,
+    }
 
 
 
@@ -979,6 +993,9 @@ def finish_run(args, profiler: cProfile.Profile, out_dir: str, elapsed: float) -
 #   main
 def main():
 
+    # TODO: audit streamer
+    # TODO: audit iter_chunks
+
     print(f"{'='*60}\nCCAT Quick-Look Mapmaker\n{'='*60}")
 
     # SETUP
@@ -1003,20 +1020,22 @@ def main():
     # - Null map (difference between two random samples of kids).
     state_2 = _makeMaps(cfgs, state_1)
 
-    # TODO: audit streamer
-    # audit iter_chunks
-    # audit 
+    # STEP 3: Iterate to produce a better common mode estimation
+    state_3 = _makeIterativeMaps(cfgs, state_1, state_2)
+
+        #     'combined_map': combined_map,
+        # 'cm_maps': cm_maps,
+        # 'pass_times': pass_times,
+
     # TODO: audit from here
 
-    combined_map, cm_maps, pass_times = step_3_iterations(
-        cfgs, state_1, state_2, kid_shifts)
-
     out_dir, metadata = step_4_save_outputs(
-        cfgs, state_1, state_2, cm_maps, pass_times, t_total)
+        cfgs, state_1, state_2, 
+        state_3['cm_maps'], state_3['pass_times'], t_total)
 
-    step_5_boresight_comparison(cfgs, state_1, combined_map, out_dir)
+    step_5_boresight_comparison(cfgs, state_1, state_3['combined_map'], out_dir)
 
-    step_6_per_detector_maps(cfgs, state_1, pd_results, out_dir, metadata)
+    # step_6_per_detector_maps(cfgs, state_1, pd_results, out_dir, metadata)
 
     finish_run(args, prof, out_dir, time.perf_counter() - t_total)
 

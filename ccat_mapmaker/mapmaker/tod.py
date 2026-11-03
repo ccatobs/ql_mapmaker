@@ -303,7 +303,7 @@ def excludedDetectors(
 
     keep_idx = np.setdiff1d(all_i, exclude_set, assume_unique=True)
 
-    print(f"Using {len(keep_idx)}/{n_total} detectors")
+    # print(f"Using {len(keep_idx)}/{n_total} detectors")
 
     return {
         'keep_idx':keep_idx,
@@ -691,8 +691,6 @@ def cleanTod(
     tod_clean = tod.copy()
 
     clean_flags = np.zeros(tod.shape, dtype=int)
-
-    t = time.perf_counter()
 
     # Fill gaps with cubic spline + noise
     tod_clean, step_flags = _fillGapsWithCubicSplineNoise(tod_clean, det_noise)

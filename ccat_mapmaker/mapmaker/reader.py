@@ -200,7 +200,7 @@ def _rechunk(
                 chunk_n = _auto_chunk_samples(
                     len(kids), sample_rate, pipeline_cfg)
                 print(
-                    f"  Auto chunk size: {chunk_n} samples "
+                    f" | Auto chunk size: {chunk_n} samples "
                     f"({chunk_n / sample_rate:.2f} s)"
                 )
             elif chunk_duration_s > 0:
@@ -685,7 +685,7 @@ def _iter_h5_simulation_chunks(
                     len(det_names), sample_rate, pipeline_cfg)
                 if chunk_index == 0:
                     print(
-                        f"  Auto chunk size: {chunk_n} samples "
+                        f" | Auto chunk size: {chunk_n} samples "
                         f"({chunk_n / sample_rate:.2f} s)"
                     )
             else:

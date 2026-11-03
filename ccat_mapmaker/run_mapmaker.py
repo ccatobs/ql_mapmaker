@@ -516,7 +516,6 @@ def _mapPass(
         'detsplit_null_map': detsplit_null_map,
         'n_dets': n_dets,
         'sample_rate': sample_rate,
-        'sample': sample,
         'tod_rms_data': tod_rms_data
     }
 
@@ -715,8 +714,6 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
         "null_map": s_sp2['null_map'],
         "detsplit_null_map": s_sp2['detsplit_null_map'],
         "sr": s_sp1['sample_rate'],
-        "raw_sample": s_sp1['sample'],
-        "cm_sample": s_sp2['sample'],
         "tod_rms_data": s_sp2['tod_rms_data'],
         "t_naive": t1,
         "t_it0": t2,

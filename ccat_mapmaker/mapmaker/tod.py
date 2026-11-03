@@ -615,24 +615,39 @@ def cleanTod(
 
     clean_flags = np.zeros(tod.shape, dtype=int)
 
+    print(f"a: {time.perf_counter() - t}")
+    t = time.perf_counter()
+
     # Fill gaps with cubic spline + noise
     tod_clean, step_flags = _fillGapsWithCubicSplineNoise(tod_clean, det_noise)
     clean_flags |= step_flags
+
+    print(f"b: {time.perf_counter() - t}")
+    t = time.perf_counter()
 
     # Remove cosmic ray spikes.
     if (params := steps.get('cosmic_rays')) is not None:
         tod_clean, step_flags = _removeCosmicRays(tod_clean, **params)
         clean_flags |= step_flags
 
+    print(f"c: {time.perf_counter() - t}")
+    t = time.perf_counter()
+
     # Apply a high pass filter.
     # Affects entire TOD, so nothing to flag?
     if (params := steps.get('highpass')) is not None:
         tod_clean = _highpassFilter(tod, sample_rate, **params)
 
+    print(f"d: {time.perf_counter() - t}")
+    t = time.perf_counter()
+
     # Apply the notch filter.
     # Affects entire TOD, so nothing to flag?
     if (params := steps.get('notch')) is not None:
         tod_clean = _notchFilter(tod_clean, sample_rate, **params)
+
+    print(f"e: {time.perf_counter() - t}")
+    t = time.perf_counter()
 
     return tod_clean, clean_flags
 

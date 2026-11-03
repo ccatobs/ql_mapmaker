@@ -615,7 +615,6 @@ def cleanTod(
 
     clean_flags = np.zeros(tod.shape, dtype=int)
 
-    print(f"a: {time.perf_counter() - t}")
     t = time.perf_counter()
 
     # Fill gaps with cubic spline + noise

@@ -121,25 +121,30 @@ def _setupProfiler(args):
 
 # ============================================================================ #
 # _printLoadingBar
-def _printLoadingBar(iteration=1, total=1, length=40, clear=False):
-    """Prints an in-place updating loading bar to stdout, clearing the line upon completion.
+def _printLoadingBar(iteration=1, total=None, length=40, clear=False):
+    """Print progress, using a spinner when the total chunk count is unknown.
 
     Args:
         iteration (int): Current step or iteration index.
-        total (int): Total number of iterations for completion.
+        total (int | None): Total steps, or None when unknown.
         length (int, optional): Character length of the progress bar. Defaults to 40.
     """
 
     if clear:
-        line_width = length + 18
+        line_width = 80
         sys.stdout.write(f'\r{" " * line_width}\r')
         sys.stdout.flush()
         return
 
-    percent = (iteration / total) * 100
-    filled_length = int(length * iteration // total)
-    bar = '█' * filled_length + '-' * (length - filled_length)
-    sys.stdout.write(f'\r|{bar}| {percent:.1f}% Complete')
+    if total is None or total <= 0:
+        spinner = "|/-\\"[iteration % 4]
+        status = f"{spinner} Processed {iteration} chunks"
+    else:
+        percent = min(iteration / total, 1.0) * 100
+        filled_length = int(length * min(iteration, total) // total)
+        bar = '█' * filled_length + '-' * (length - filled_length)
+        status = f'|{bar}| {percent:.1f}% Complete'
+    sys.stdout.write(f'\r{status:<79}')
     sys.stdout.flush()
 
 
@@ -253,8 +258,7 @@ def _prepPass(cfg: dict):
     init = False
     for i,chunk in enumerate(reader.iter_chunks(cfg)): # chunk_id=chunk.chunk_index
 
-        if cfg['total_chunks'] is not None:
-            _printLoadingBar(i, cfg['total_chunks'], length=40)
+        _printLoadingBar(i + 1, cfg.get('total_chunks'), length=40)
 
         # Skip chunks where all detector data is flagged out
         if np.all(chunk.flags != 0):
@@ -422,8 +426,7 @@ def _mapPass(
     for i,chunk in enumerate(reader.iter_chunks(cfgs)):
         chunk_id = chunk.chunk_index
 
-        if cfgs['total_chunks'] is not None:
-            _printLoadingBar(i, cfgs['total_chunks'], length=40)
+        _printLoadingBar(i + 1, cfgs.get('total_chunks'), length=40)
 
         # Skip chunks where all detector data is flagged out
         if np.all(chunk.flags != 0):

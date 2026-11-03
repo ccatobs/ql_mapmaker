@@ -688,10 +688,7 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
 
     # Make a 'naive' first map
     t = time.perf_counter()
-    s_sp1 = _mapPass( # state var
-        cfg, state_1,
-        common_mode=False, return_sample=True,
-    )
+    s_sp1 = _mapPass(cfg, state_1, common_mode=False)
     t1 = time.perf_counter() - t
 
     print(f"  Naive map (chunk_duration_s={chunk_s})")
@@ -705,11 +702,7 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
     # - Null map (difference between two random samples of kids).
     # TODO: null map needs to be separated from streaming pass and improved.
     t = time.perf_counter()
-    s_sp2 = _mapPass(
-        cfg, state_1, 
-        return_sample=True, collect_tod_rms=True,
-        weights=state_1["det_weights_kept"]
-    )
+    s_sp2 = _mapPass(cfg, state_1, weights=state_1["det_weights_kept"])
     t2 = time.perf_counter() - t
 
     print(f"  Initial common-mode pass [{t2:.1f}s]")

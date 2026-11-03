@@ -432,116 +432,68 @@ def _removeCosmicRays(
         tod: np.ndarray,
         sigma: float = 3.5, max_width: int = 5, n: int = 2
         ) -> tuple[np.ndarray, np.ndarray]:
-    """Vectorized cosmic ray removal.
-    TOD and mask have shape (n_samps, n_dets).
-    
-    tod (array of floats): Time-ordered data. We operate in-place.
-    flag_mask (array of ints): Boolean mask.
+    """Detect narrow spikes and interpolate over them in-place.
+
+    tod (2D array of floats): Time-ordered data with shape (n_samps, n_dets).
     sigma (float): Threshold multiplier.
     max_width (int): Maximum width in samples to be cosmic ray.
     n (int): Extra samples to pad on each side of the detected spike.
-        
+
     Returns:
-        tod_clean (array of floats): Interpolated TOD.
-        new_flags (array of int): Flag array marking cosmic ray regions.
+        tuple[np.ndarray, np.ndarray]: The modified TOD and flags marking
+            cosmic ray regions.
     """
 
-    # 1. Linear-time global or per-column derivative (Axis 0)
-    # Masking invalid samples to 0 before diffing
-    masked_tod = tod
-    dtod = np.diff(masked_tod, axis=0, prepend=masked_tod[:1, :])
-
-    # 2. Fast O(N) std calculation across Axis 0
-    # Avoid np.nanstd here—np.std runs native SIMD C-loops
-    std_per_det = np.std(masked_tod, axis=0, keepdims=True)
-    threshold = std_per_det * sigma
-
-    # 3. Identify rising (+diff) and falling (-diff) edges
-    pos_edges = dtod > threshold      # Shape: (n_samps, n_dets)
-    neg_edges = dtod < -threshold     # Shape: (n_samps, n_dets)
-
-    # 4. Vectorized width check using logical shifts (no detector loops)
-    # Checks if a rising edge has a matching falling edge within max_width samples
-    has_falling_edge = np.zeros_like(pos_edges, dtype=bool)
-    for shift in range(1, max_width + 1):
-        # Roll falling edge mask backward in time to match rising edge positions
-        shifted_neg = np.pad(neg_edges[shift:, :], ((0, shift), (0, 0)), mode='constant')
-        has_falling_edge |= shifted_neg
-
-    # Valid spikes are rising edges that have a matching drop within max_width
-    valid_spikes = pos_edges & has_falling_edge
-
-    # 5. Expand hit mask by n samples using 1D uniform filter / binary dilation across axis 0
-    spike_mask = np.zeros_like(valid_spikes, dtype=bool)
-    for pad in range(-n, n + 1):
-        if pad < 0:
-            spike_mask[:-pad, :] |= valid_spikes[-pad:, :]
-        elif pad > 0:
-            spike_mask[pad:, :] |= valid_spikes[:-pad, :]
-        else:
-            spike_mask |= valid_spikes
-
-    # 6. Linear interpolation on flagged samples per detector column
-    # If speed is paramount, set flagged regions to NaN or linear-fill via vector masking
-    tod_clean = tod.copy()
-    if np.any(spike_mask):
-        # Apply flag constant
-        new_flags = spike_mask.astype(int) * FLAG_COSMIC_RAY
-        
-        # Mask out cosmic rays for clean output
-        # For ultra-fast mapmaking, setting spike_mask to 0 or local mean avoids np.interp calls
-        tod_clean[spike_mask] = 0.0  # Or apply quick np.interp only on affected columns
-    else:
-        new_flags = np.zeros(tod.shape, dtype=int)
-
-    return tod_clean, new_flags
-
-'''
     n_samps, n_dets = tod.shape
     new_flags = np.zeros((n_samps, n_dets), dtype=int)
 
-    # Compute time derivative
-    dtod = np.diff(tod, axis=0, prepend=tod[:1])
+    if n_samps == 0:
+        return tod, new_flags
 
-    # Dynamic threshold per detector based on robust dispersion (or std)
+    # Compute the derivative without allocating the concatenated prepend array.
+    dtod = np.empty_like(tod)
+    dtod[0] = 0
+    np.subtract(tod[1:], tod[:-1], out=dtod[1:])
+
+    # Dynamic threshold per detector based on standard deviation.
     threshold = np.std(tod, axis=0) * sigma
 
-    # Identify rising and falling edge candidates across all detectors
-    pos_spikes = dtod > threshold   # Leading edge
-    neg_spikes = dtod < -threshold  # Trailing edge
+    pos_spikes = dtod > threshold
+    if not np.any(pos_spikes):
+        return tod, new_flags
+    neg_spikes = dtod < -threshold
 
-    # Width check & masking per detector column
-    # to find opposite edges separated by <= max_width.
-    for col in range(n_dets):
-        p_idx = np.where(pos_spikes[:, col])[0]
-        if len(p_idx) == 0:
+    # For each rising edge, find a falling edge at the same or a later sample,
+    # no more than max_width samples away.
+    has_falling_edge = neg_spikes.copy()
+    for shift in range(1, min(max_width + 1, n_samps)):
+        has_falling_edge[:-shift] |= neg_spikes[shift:]
+    valid_spikes = pos_spikes & has_falling_edge
+    if not np.any(valid_spikes):
+        return tod, new_flags
+
+    # Each detected rising edge flags [idx - n, idx + max_width + n].
+    spike_mask = np.zeros_like(valid_spikes)
+    for offset in range(-n, max_width + n + 1):
+        if abs(offset) >= n_samps:
             continue
-            
-        col_mask = np.zeros(n_samps, dtype=bool)
-        
-        # Match rising edges to subsequent falling edges within max_width
-        for idx in p_idx:
-            # Look ahead up to max_width for the corresponding drop
-            window_end = min(n_samps, idx + max_width + 1)
-            if np.any(neg_spikes[idx:window_end, col]):
-                # It's a narrow spike! Expand by n samples on both sides
-                start = max(0, idx - n)
-                end = min(n_samps, window_end + n)
-                col_mask[start:end] = True
+        if offset < 0:
+            spike_mask[:offset] |= valid_spikes[-offset:]
+        elif offset > 0:
+            spike_mask[offset:] |= valid_spikes[:-offset]
+        else:
+            spike_mask |= valid_spikes
 
-        if not np.any(col_mask):
-            continue
-
-        # Interpolate over flagged region using valid surrounding points
-        valid = np.where(~col_mask)[0]
-        if len(valid) >= 2:
-            flagged_indices = np.where(col_mask)[0]
+    for col in np.flatnonzero(np.any(spike_mask, axis=0)):
+        col_mask = spike_mask[:, col]
+        valid = np.flatnonzero(~col_mask)
+        if valid.size >= 2:
+            flagged_indices = np.flatnonzero(col_mask)
             tod[flagged_indices, col] = np.interp(
                 flagged_indices, valid, tod[valid, col])
             new_flags[col_mask, col] = FLAG_COSMIC_RAY
 
     return tod, new_flags
-'''
 
 
 # ============================================================================ #

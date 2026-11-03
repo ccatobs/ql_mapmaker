@@ -464,15 +464,10 @@ def _mapPass(
             steps=cfgs.get('pipeline'))
         clean_flag_mask = np.where(clean_flags!=0, np.nan, flag_mask)
 
-        if also_naive:
-            naive_d, naive_h, _ = map.binChunk(
-                sig, clean_flag_mask, ra, dec,
-                state_1["ra_edges"], state_1["dec_edges"])
-            naive_data += naive_d
-            naive_hits += naive_h
-
         # print(f"1: {time.perf_counter() - t}")
         # t = time.perf_counter()
+
+        naive_sig = sig if also_naive else None
 
         # Common mode subtraction
         if common_mode:
@@ -482,10 +477,19 @@ def _mapPass(
                 current_map)
 
         # Make map for this chunk (0.2 s)
-        d, h, sq = map.binChunk(
-            sig, clean_flag_mask, ra, dec, 
-            state_1["ra_edges"], state_1["dec_edges"], 
-            weights=weights)
+        if also_naive:
+            naive_d, naive_h, d, h, sq = map.binChunkPair(
+                naive_sig, sig, clean_flag_mask, ra, dec,
+                state_1["ra_edges"], state_1["dec_edges"],
+                weights=weights,
+            )
+            naive_data += naive_d
+            naive_hits += naive_h
+        else:
+            d, h, sq = map.binChunk(
+                sig, clean_flag_mask, ra, dec,
+                state_1["ra_edges"], state_1["dec_edges"],
+                weights=weights)
 
         # Add chunk map to running total maps
         total_data += d

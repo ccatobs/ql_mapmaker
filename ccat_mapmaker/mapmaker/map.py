@@ -159,6 +159,77 @@ def binChunk(
         ).reshape(ny, nx)
 
     return data, hits, sumsq
+    return data, hits, sumsq
+
+def binChunkPair(
+        naive_signal: np.ndarray, signal: np.ndarray, flag_mask: np.ndarray,
+        ra: np.ndarray, dec: np.ndarray,
+        ra_edges: np.ndarray, dec_edges: np.ndarray,
+        weights: np.ndarray,
+        ):
+    """Bin naive and weighted signals while computing pixel indices once."""
+    n_dets = signal.shape[1]
+    det_w = np.asarray(weights, dtype=float)
+    if naive_signal.shape != signal.shape or det_w.shape != (n_dets,):
+        raise ValueError("Naive/weighted signals and detector weights must have matching shapes")
+    naive_flat = np.ascontiguousarray(naive_signal).ravel()
+    sig_flat = np.ascontiguousarray(signal).ravel()
+    ra_flat = np.ascontiguousarray(ra).ravel()
+    dec_flat = np.ascontiguousarray(dec).ravel()
+    flags = np.nan_to_num(flag_mask, nan=0.0, posinf=0.0, neginf=0.0).ravel()
+
+    ny = dec_edges.size - 1
+    nx = ra_edges.size - 1
+    ra_step = np.diff(ra_edges)
+    dec_step = np.diff(dec_edges)
+    is_regular = (
+        ra_step.size and dec_step.size
+        and np.allclose(ra_step, ra_step[0])
+        and np.allclose(dec_step, dec_step[0])
+    )
+    finite_pointing = np.isfinite(ra_flat) & np.isfinite(dec_flat)
+    safe_ra = np.where(finite_pointing, ra_flat, ra_edges[0])
+    safe_dec = np.where(finite_pointing, dec_flat, dec_edges[0])
+    if is_regular:
+        ix = np.floor((safe_ra - ra_edges[0]) / ra_step[0]).astype(np.int64)
+        iy = np.floor((safe_dec - dec_edges[0]) / dec_step[0]).astype(np.int64)
+    else:
+        ix = np.digitize(safe_ra, ra_edges) - 1
+        iy = np.digitize(safe_dec, dec_edges) - 1
+
+    valid = (
+        finite_pointing & (flags != 0)
+        & (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+    )
+    if not np.any(valid):
+        empty = np.zeros((ny, nx), dtype=float)
+        return empty, empty.copy(), empty.copy(), empty.copy(), empty.copy()
+
+    valid_indices = np.flatnonzero(valid)
+    flat_idx = iy[valid_indices] * nx + ix[valid_indices]
+    valid_flags = flags[valid_indices]
+    naive_values = naive_flat[valid] * valid_flags
+    weighted_flags = valid_flags * det_w[valid_indices % n_dets]
+    weighted_values = sig_flat[valid] * weighted_flags
+
+    naive_data = np.bincount(
+        flat_idx, weights=naive_values, minlength=nx * ny
+    ).reshape(ny, nx)
+    naive_hits = np.bincount(
+        flat_idx, weights=valid_flags, minlength=nx * ny
+    ).reshape(ny, nx)
+    data = np.bincount(
+        flat_idx, weights=weighted_values, minlength=nx * ny
+    ).reshape(ny, nx)
+    hits = np.bincount(
+        flat_idx, weights=weighted_flags, minlength=nx * ny
+    ).reshape(ny, nx)
+    sumsq = np.bincount(
+        flat_idx, weights=sig_flat[valid] * weighted_values,
+        minlength=nx * ny
+    ).reshape(ny, nx)
+    return naive_data, naive_hits, data, hits, sumsq
+
 
 '''
 def bin_chunk(

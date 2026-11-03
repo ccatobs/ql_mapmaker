@@ -371,7 +371,6 @@ def _cubic_gap_weights(
     weights.setflags(write=False)
     return weights
 
-
 def _interpolate_cubic_gap(
         tod: np.ndarray, det: int, anchors: np.ndarray,
         start: int, end: int
@@ -383,7 +382,6 @@ def _interpolate_cubic_gap(
         return weights @ tod[anchors, det]
     return CubicSpline(
         anchors, tod[anchors, det])(np.arange(start, end))
-
 
 def _fillGapsWithCubicSplineNoise(
         tod: np.ndarray, noise_stds: np.ndarray,
@@ -696,20 +694,14 @@ def cleanTod(
 
     t = time.perf_counter()
 
-    # Fill gaps with cubic spline + noise (0.14 s)
+    # Fill gaps with cubic spline + noise
     tod_clean, step_flags = _fillGapsWithCubicSplineNoise(tod_clean, det_noise)
     clean_flags |= step_flags
 
-    print(f"/nfill gaps: {time.perf_counter() - t}")
-    t = time.perf_counter()
-
-    # Remove cosmic ray spikes. (0.42 s)
+    # Remove cosmic ray spikes. (0.17 s)
     if (params := steps.get('cosmic_rays')) is not None:
         tod_clean, step_flags = _removeCosmicRays(tod_clean, **params)
         clean_flags |= step_flags
-
-    print(f"cosmic rays: {time.perf_counter() - t}")
-    t = time.perf_counter()
 
     # Apply a high pass filter.
     # Affects entire TOD, so nothing to flag?

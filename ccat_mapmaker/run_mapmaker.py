@@ -452,9 +452,7 @@ def _mapPass(
         # Build flag mask: 0->nan
         flag_mask = np.where(flags!=0, np.nan, 1.0)
 
-        t = time.perf_counter()
-
-        # Clean the timestreams (cosmic rays, gaps, etc.)
+        # Clean the timestreams (cosmic rays, gaps, etc.) (0.29 s)
         # Not using the flag_mask here 
         # because I don't know what the flags are.
         sig, clean_flags = tod.cleanTod(
@@ -462,8 +460,8 @@ def _mapPass(
             steps=cfgs.get('pipeline'))
         clean_flag_mask = np.where(clean_flags!=0, np.nan, flag_mask)
 
-        print(f"1: {time.perf_counter() - t}")
-        t = time.perf_counter()
+        # print(f"1: {time.perf_counter() - t}")
+        # t = time.perf_counter()
 
         # Common mode subtraction
         if common_mode:
@@ -472,17 +470,11 @@ def _mapPass(
                 ra, dec, state_1["ra_edges"], state_1["dec_edges"],
                 current_map)
 
-        print(f"2: {time.perf_counter() - t}")
-        t = time.perf_counter()
-
-        # Make map for this chunk
+        # Make map for this chunk (0.2 s)
         d, h, sq = map.binChunk(
             sig, clean_flag_mask, ra, dec, 
             state_1["ra_edges"], state_1["dec_edges"], 
             weights=weights)
-
-        print(f"3: {time.perf_counter() - t}")
-        t = time.perf_counter()
 
         # Add chunk map to running total maps
         total_data += d

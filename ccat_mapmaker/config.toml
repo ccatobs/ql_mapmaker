@@ -118,8 +118,8 @@ weight_cap_factor = 5.0
 # always computed.
 # - compute_time_null: even/odd chunk-parity half-difference. Numerically free (reuses the main bin_chunk result); disabling it just skips its .npy/.png output.
 # - compute_detsplit_null: random 50/50 detector-identity half-difference. Costs 2 extra bin_chunk calls per chunk -- the one that's actually worth turning off for speed.
-compute_time_null     = true
-compute_detsplit_null = true
+compute_time_null     = false
+compute_detsplit_null = false
 
 # ---------------------------------------------------------------- #
 # pipeline.cosmic_rays

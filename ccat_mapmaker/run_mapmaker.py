@@ -467,46 +467,47 @@ def _mapPass(
                 ra, dec, state_1["ra_edges"], state_1["dec_edges"],
                 current_map)
 
-        # TODO: audit from here
+        # Make map for this chunk
+        d, h, sq = map.binChunk(
+            sig, clean_flag_mask, ra, dec, 
+            state_1["ra_edges"], state_1["dec_edges"], 
+            weights=weights)
 
-        d, h, sq = map.bin_chunk(sig, clean_flag_mask, ra, dec, state_1["ra_edges"], state_1["dec_edges"], weights=weights)
+        # Add chunk map to running total maps
         total_data += d
         total_hits += h
         total_sumsq += sq
 
+        # Null maps
         if compute_time_null:
             half = chunk_id % 2
             null_data[half] += d
             null_hits[half] += h
-
         if compute_detsplit_null:
             for dhalf in (0, 1):
                 m = det_half == dhalf
                 w_half = weights[m] if weights is not None else None
-                d_ds, h_ds, _ = map.bin_chunk(
-                    sig[:, m], clean_flag_mask[:, m], ra[:, m], dec[:, m], state_1["ra_edges"], state_1["dec_edges"], weights=w_half)
+                d_ds, h_ds, _ = map.binChunk(
+                    sig[:, m], clean_flag_mask[:, m], ra[:, m], dec[:, m], state_1["ra_edges"], state_1["dec_edges"], 
+                    weights=w_half)
                 detsplit_data[dhalf] += d_ds
                 detsplit_hits[dhalf] += h_ds
 
     _printLoadingBar(clear=True)
 
+    # Create the total maps
     with np.errstate(invalid='ignore', divide='ignore'):
         combined = np.where(total_hits > 0, total_data / total_hits, np.nan)
         mean_sq = np.where(total_hits > 0, total_sumsq / total_hits, np.nan)
         variance = np.clip(mean_sq - combined ** 2, 0, None)
         noise_map = np.sqrt(variance / total_hits)
 
-        null_map = None
-        if compute_time_null:
-            map_a = np.where(null_hits[0]>0, null_data[0]/null_hits[0], np.nan)
-            map_b = np.where(null_hits[1]>0, null_data[1]/null_hits[1], np.nan)
-            null_map = (map_a - map_b) / 2.0
-
-        detsplit_null_map = None
-        if compute_detsplit_null:
-            map_a_ds = np.where(detsplit_hits[0] > 0, detsplit_data[0] / detsplit_hits[0], np.nan)
-            map_b_ds = np.where(detsplit_hits[1] > 0, detsplit_data[1] / detsplit_hits[1], np.nan)
-            detsplit_null_map = (map_a_ds - map_b_ds) / 2.0
+        def compute_null(hits, data):
+            a = np.where(hits[0] > 0, data[0] / hits[0], np.nan)
+            b = np.where(hits[1] > 0, data[1] / hits[1], np.nan)
+            return (a - b) / 2.0
+        null_map = compute_null(null_hits, null_data) if compute_time_null else None
+        detsplit_null_map = compute_null(detsplit_hits, detsplit_data) if compute_detsplit_null else None
 
     return {
         'combined': combined,
@@ -605,9 +606,6 @@ def _mapPrep(cfg: dict) -> dict:
     s_de = tod.excludedDetectors( # detector state
         s_fp['all_kids'], s_fp['det_noise'], 
         s_fp['white_noise_floor'], cfg["pipeline"])
-
-    print(f"  Detector exclusions done. [{time.perf_counter()-t:.1f} s]")
-    t = time.perf_counter()
 
     # Find detector weights.
     # This uses a static weight per detector:

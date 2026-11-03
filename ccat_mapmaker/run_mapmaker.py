@@ -1012,6 +1012,8 @@ def main():
     # - Sets up the spatial pixel grid edges.
     state_1 = _mapPrep(cfgs)
 
+    print()
+
     # STEP 2: One data pass builds both initial maps.
     # - 'naive' first map and common-mode-removed map.
     # - Hits map.
@@ -1019,8 +1021,12 @@ def main():
     # - Null map (difference between two random samples of kids).
     state_2 = _makeMaps(cfgs, state_1)
 
+    print()
+
     # STEP 3: Iterate to produce a better common mode estimation
     state_3 = _makeIterativeMaps(cfgs, state_1, state_2)
+
+    print()
 
         #     'combined_map': combined_map,
         # 'cm_maps': cm_maps,
@@ -1032,9 +1038,15 @@ def main():
         cfgs, state_1, state_2, 
         state_3['cm_maps'], state_3['pass_times'], t_total)
 
+    print()
+
     step_5_boresight_comparison(cfgs, state_1, state_3['combined_map'], out_dir)
 
+    print()
+
     # step_6_per_detector_maps(cfgs, state_1, pd_results, out_dir, metadata)
+
+    print()
 
     finish_run(args, prof, out_dir, time.perf_counter() - t_total)
 

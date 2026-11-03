@@ -632,7 +632,7 @@ def _mapPrep(cfg: dict) -> dict:
         s_fp['all_kids'], s_fp['det_noise'], 
         s_fp['white_noise_floor'], cfg["pipeline"])
 
-    print(f" | Using {len(s_de['keep_idx'])}/{s_de['keep_idx']+s_de['exclude_set']} detectors")
+    print(f" | Using {len(s_de['keep_idx'])}/{len(s_de['keep_idx'])+len(s_de['exclude_set'])} detectors")
 
     # Find detector weights.
     # This uses a static weight per detector:

@@ -287,20 +287,21 @@ def _prepPass(cfg: dict):
             init = True
         # ------------------------------------------------------ #
 
-        # Create a copy of the signal with flagged points set to NaN
-        signal_masked = chunk.signal.astype(float, copy=True)
-        signal_masked[chunk.flags != 0] = np.nan
-
-        # Temporal differences and validity mask
-        diffs = signal_masked[1:] - signal_masked[:-1]
-        valid_mask = np.isfinite(diffs)
+        # Accumulate only differences whose two endpoint samples are usable.
+        diffs = np.subtract(chunk.signal[1:], chunk.signal[:-1], dtype=float)
+        valid_mask = (
+            np.isfinite(diffs)
+            & (chunk.flags[1:] == 0)
+            & (chunk.flags[:-1] == 0)
+        )
 
         # Advance accumulations (t=0.53 s)
         ra_sum          += chunk.ra_bore.sum()
         dec_sum         += chunk.dec_bore.sum()
         n_bore          += len(chunk.ra_bore)
-        det_diff_sum    += np.nansum(diffs, axis=0)
-        det_diff_sum_sq += np.nansum((diffs ** 2), axis=0)
+        det_diff_sum += np.sum(diffs, axis=0, where=valid_mask)
+        np.square(diffs, out=diffs)
+        det_diff_sum_sq += np.sum(diffs, axis=0, where=valid_mask)
         det_diff_count  += np.sum(valid_mask, axis=0)
         n_chunks        += 1
 
@@ -381,7 +382,8 @@ def _mapPass(
     state_1: dict,
     current_map: np.ndarray = None,
     common_mode: bool = True,
-    weights: np.ndarray = None
+    weights: np.ndarray = None,
+    also_naive: bool = False,
     ):
 
     pipe_cfg = cfgs['pipeline']
@@ -406,6 +408,8 @@ def _mapPass(
     total_data = zerosMap()
     total_hits = zerosMap()
     total_sumsq = zerosMap()
+    naive_data = zerosMap() if also_naive else None
+    naive_hits = zerosMap() if also_naive else None
     null_data = zerosMapList() if compute_time_null else None
     null_hits = zerosMapList() if compute_time_null else None
     detsplit_data = zerosMapList() if compute_detsplit_null else None
@@ -459,6 +463,13 @@ def _mapPass(
             sig, chunk.sample_rate, state_1['det_noise'], 
             steps=cfgs.get('pipeline'))
         clean_flag_mask = np.where(clean_flags!=0, np.nan, flag_mask)
+
+        if also_naive:
+            naive_d, naive_h, _ = map.binChunk(
+                sig, clean_flag_mask, ra, dec,
+                state_1["ra_edges"], state_1["dec_edges"])
+            naive_data += naive_d
+            naive_hits += naive_h
 
         # print(f"1: {time.perf_counter() - t}")
         # t = time.perf_counter()
@@ -514,6 +525,10 @@ def _mapPass(
 
     return {
         'combined': combined,
+        'naive': (
+            np.where(naive_hits > 0, naive_data / naive_hits, np.nan)
+            if also_naive else None
+        ),
         'total_hits': total_hits,
         'noise_map': noise_map,
         'null_map': null_map,
@@ -686,38 +701,26 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
     pipe_cfg = cfg["pipeline"]
     chunk_s = pipe_cfg.get("chunk_duration_s", 1.0)
 
-    # Make a 'naive' first map
+    # Share the input read and cleaning work between the naive and CM maps.
     t = time.perf_counter()
-    s_sp1 = _mapPass(cfg, state_1, common_mode=False)
-    t1 = time.perf_counter() - t
+    s_sp = _mapPass(
+        cfg, state_1, weights=state_1["det_weights_kept"], also_naive=True)
+    initial_pass_time = time.perf_counter() - t
 
-    print(f"  Naive map (chunk_duration_s={chunk_s})")
-    print(f"    {s_sp1['n_dets']} detectors"\
-          f", {s_sp1['sample_rate']:.1f} Hz, [{t1:.1f}s]")
-
-    # Make a more robust map:
-    # - Common mode removed (1 pass).
-    # - Hits map.
-    # - Noise map.
-    # - Null map (difference between two random samples of kids).
-    # TODO: null map needs to be separated from streaming pass and improved.
-    t = time.perf_counter()
-    s_sp2 = _mapPass(cfg, state_1, weights=state_1["det_weights_kept"])
-    t2 = time.perf_counter() - t
-
-    print(f"  Initial common-mode pass [{t2:.1f}s]")
+    print(f"  Naive + initial common-mode maps (chunk_duration_s={chunk_s})")
+    print(f"    {s_sp['n_dets']} detectors"\
+          f", {s_sp['sample_rate']:.1f} Hz, [{initial_pass_time:.1f}s]")
 
     return {
-        "naive": s_sp1['combined'],
-        "combined_map": s_sp2['combined'],
-        "hits": s_sp2['total_hits'],
-        "noise_map": s_sp2['noise_map'],
-        "null_map": s_sp2['null_map'],
-        "detsplit_null_map": s_sp2['detsplit_null_map'],
-        "sr": s_sp1['sample_rate'],
-        "tod_rms_data": s_sp2['tod_rms_data'],
-        "t_naive": t1,
-        "t_it0": t2,
+        "naive": s_sp['naive'],
+        "combined_map": s_sp['combined'],
+        "hits": s_sp['total_hits'],
+        "noise_map": s_sp['noise_map'],
+        "null_map": s_sp['null_map'],
+        "detsplit_null_map": s_sp['detsplit_null_map'],
+        "sr": s_sp['sample_rate'],
+        "tod_rms_data": s_sp['tod_rms_data'],
+        "t_initial": initial_pass_time,
     }
 
 
@@ -729,7 +732,7 @@ def step_3_iterations(cfg: dict, step1_res: dict, step2_res: dict, kid_shifts: d
     combined_map = step2_res["combined_map"]
 
     cm_maps = [("it_0", combined_map.copy())]
-    pass_times = [("naive", step2_res["t_naive"]), ("it_0", step2_res["t_it0"])]
+    pass_times = [("naive + it_0", step2_res["t_initial"])]
 
     if n_iters > 0:
         print(f"Step 3: {n_iters} iteration(s)...")
@@ -794,6 +797,10 @@ def _build_metadata(cfg: dict, step1_res: dict, cm_maps: list, pass_times: list,
         "pipeline_start_offset_s": pipe_cfg.get("start_offset_s", 0.0),
         "pipeline_max_duration_s": pipe_cfg.get("max_duration_s", None),
         "pipeline_chunk_duration_s": pipe_cfg.get("chunk_duration_s", 1.0),
+        "pipeline_chunk_memory_fraction": pipe_cfg.get("chunk_memory_fraction", 0.5),
+        "pipeline_chunk_memory_gb": pipe_cfg.get("chunk_memory_gb", 0.0),
+        "pipeline_resolved_chunk_durations_s": pipe_cfg.get(
+            "_resolved_chunk_durations_s", []),
         "pipeline_clean_steps": pipe_cfg.get("clean_steps", []),
         "pipeline_cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
         "pipeline_highpass": pipe_cfg.get("highpass", {}),
@@ -982,9 +989,8 @@ def main():
     # - Sets up the spatial pixel grid edges.
     state_1 = _mapPrep(cfgs)
 
-    # STEP 2: Two data passes to build out the maps.
-    # - 'naive' first map.
-    # - Common mode removed map (1 pass).
+    # STEP 2: One data pass builds both initial maps.
+    # - 'naive' first map and common-mode-removed map.
     # - Hits map.
     # - Noise map.
     # - Null map (difference between two random samples of kids).

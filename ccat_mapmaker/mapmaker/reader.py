@@ -28,19 +28,11 @@ All arrays are time-first: (n_samps, n_dets).
 """
 
 
-# TODO: chunk_duration_s requires knowing how many seconds you want
-# it would be better to be adaptable to memory allowances.
-# For example, determine available memory (with some buffer),
-# and have a max from config file, then choose smaller of two.
-# Then determine how many seconds of chunk that is.
-# Need to consider what the allowable buffer would be from testing,
-# since we will have overhead from other things in memory too.
-
-
-
 import io
 import glob
+import math
 import pathlib
+from collections import deque
 from typing import Iterator, Optional
 
 import numpy as np
@@ -95,7 +87,57 @@ class Chunk:
 
 # ============================================================================ #
 # _rechunk
-def _rechunk(frame_iter: Iterator[Chunk], chunk_duration_s: float) -> Iterator[Chunk]:
+def _auto_chunk_samples(
+        n_dets: int, sample_rate: float, pipeline_cfg: dict
+        ) -> int:
+    """Choose a conservative chunk length from the current available memory."""
+    if n_dets < 1 or not math.isfinite(sample_rate) or sample_rate <= 0:
+        raise ValueError("Automatic chunk sizing requires detectors and a positive sample rate")
+
+    memory_fraction = pipeline_cfg.get("chunk_memory_fraction", 0.5)
+    memory_limit_gb = pipeline_cfg.get("chunk_memory_gb", 0.0)
+    if (
+        not isinstance(memory_fraction, (int, float))
+        or not math.isfinite(memory_fraction)
+        or not 0 < memory_fraction <= 1
+    ):
+        raise ValueError("pipeline.chunk_memory_fraction must be in (0, 1]")
+    if (
+        not isinstance(memory_limit_gb, (int, float))
+        or not math.isfinite(memory_limit_gb)
+        or memory_limit_gb < 0
+    ):
+        raise ValueError("pipeline.chunk_memory_gb must be finite and non-negative")
+
+    try:
+        import psutil
+    except ImportError as exc:
+        raise RuntimeError(
+            "Automatic chunk sizing requires psutil; install the project environment"
+        ) from exc
+
+    available_bytes = psutil.virtual_memory().available
+    target_bytes = available_bytes * memory_fraction
+    if memory_limit_gb > 0:
+        target_bytes = min(target_bytes, memory_limit_gb * 1024**3)
+
+    # Account conservatively for input arrays, cleaning temporaries, and binning.
+    bytes_per_sample = n_dets * 256
+    samples = int(target_bytes // bytes_per_sample)
+    if samples < 1:
+        raise MemoryError(
+            "Available chunk-memory budget is too small for even one sample "
+            f"across {n_dets} detectors"
+        )
+    pipeline_cfg.setdefault("_resolved_chunk_durations_s", []).append(
+        samples / sample_rate)
+    return samples
+
+
+def _rechunk(
+        frame_iter: Iterator[Chunk], chunk_duration_s: float | str,
+        pipeline_cfg: dict | None = None
+        ) -> Iterator[Chunk]:
     """
     Rebuffer variable-length frame-level Chunks into fixed-duration Chunks.
 
@@ -103,18 +145,65 @@ def _rechunk(frame_iter: Iterator[Chunk], chunk_duration_s: float) -> Iterator[C
     advances the buffer. The final chunk may be shorter than chunk_n.
     If chunk_duration_s <= 0, yields each frame unchanged (frame-aligned mode).
     """
-    buf_sig = buf_ra = buf_dec = buf_rb = buf_db = buf_bq = buf_flags = None
     kids = sample_rate = t_start = det_dirs = None
-    chunk_n     = None
+    chunk_n = None
     chunk_index = 0
+    pending: deque[Chunk] = deque()
+    pending_offset = 0
+    pending_samples = 0
+
+    def take_samples(n_samples: int) -> dict[str, np.ndarray | None]:
+        nonlocal pending_offset, pending_samples
+        parts: dict[str, list[np.ndarray]] = {
+            "signal": [],
+            "ra": [],
+            "dec": [],
+            "ra_bore": [],
+            "dec_bore": [],
+            "boresight_q": [],
+            "flags": [],
+        }
+        remaining = n_samples
+        while remaining:
+            frame = pending[0]
+            take = min(remaining, frame.signal.shape[0] - pending_offset)
+            end = pending_offset + take
+            for name in parts:
+                arr = getattr(frame, name)
+                if arr is not None:
+                    parts[name].append(arr[pending_offset:end])
+            pending_offset = end
+            remaining -= take
+            pending_samples -= take
+            if pending_offset == frame.signal.shape[0]:
+                pending.popleft()
+                pending_offset = 0
+
+        return {
+            name: (
+                values[0] if len(values) == 1
+                else np.concatenate(values, axis=0) if values
+                else None
+            )
+            for name, values in parts.items()
+        }
 
     for frame in frame_iter:
         if kids is None:
             kids        = frame.kids
             sample_rate = frame.sample_rate
-            t_start     = frame.t_start
+            t_start = frame.t_start
             det_dirs    = frame.det_dirs
-            if chunk_duration_s > 0:
+            if chunk_duration_s == "auto":
+                if pipeline_cfg is None:
+                    raise ValueError("Automatic chunk sizing requires pipeline configuration")
+                chunk_n = _auto_chunk_samples(
+                    len(kids), sample_rate, pipeline_cfg)
+                print(
+                    f"  Auto chunk size: {chunk_n} samples "
+                    f"({chunk_n / sample_rate:.2f} s)"
+                )
+            elif chunk_duration_s > 0:
                 chunk_n = max(1, int(chunk_duration_s * sample_rate))
         if chunk_n is None:
             yield Chunk(
@@ -129,49 +218,40 @@ def _rechunk(frame_iter: Iterator[Chunk], chunk_duration_s: float) -> Iterator[C
             chunk_index += 1
             continue
 
-        buf_sig = frame.signal      if buf_sig is None else np.concatenate([buf_sig, frame.signal],      axis=0)
-        if frame.ra is not None:
-            buf_ra  = frame.ra  if buf_ra  is None else np.concatenate([buf_ra,  frame.ra],  axis=0)
-            buf_dec = frame.dec if buf_dec is None else np.concatenate([buf_dec, frame.dec], axis=0)
-        buf_rb  = frame.ra_bore     if buf_rb  is None else np.concatenate([buf_rb,  frame.ra_bore])
-        buf_db  = frame.dec_bore    if buf_db  is None else np.concatenate([buf_db,  frame.dec_bore])
-        buf_bq  = frame.boresight_q if buf_bq  is None else np.concatenate([buf_bq,  frame.boresight_q], axis=0)
-        buf_flags = frame.flags     if buf_flags is None else np.concatenate([buf_flags, frame.flags], axis=0)
+        if frame.signal.shape[0] == 0:
+            continue
+
+        pending.append(frame)
+        pending_samples += frame.signal.shape[0]
 
         assert kids is not None and sample_rate is not None and t_start is not None
-        while buf_sig.shape[0] >= chunk_n:
+        while pending_samples >= chunk_n:
+            arrays = take_samples(chunk_n)
             t_stop = t_start + chunk_n / sample_rate
             yield Chunk(
-                kids=kids, signal=buf_sig[:chunk_n], common_mode=None,
-                ra=buf_ra[:chunk_n] if buf_ra is not None else None,
-                dec=buf_dec[:chunk_n] if buf_dec is not None else None,
-                ra_bore=buf_rb[:chunk_n], dec_bore=buf_db[:chunk_n],
-                boresight_q=buf_bq[:chunk_n] if buf_bq is not None else None ,
+                kids=kids, signal=arrays["signal"], common_mode=None,
+                ra=arrays["ra"], dec=arrays["dec"],
+                ra_bore=arrays["ra_bore"], dec_bore=arrays["dec_bore"],
+                boresight_q=arrays["boresight_q"],
                 det_dirs=det_dirs,
-                t_start=t_start, t_stop=t_stop, flags=buf_flags[:chunk_n],
+                t_start=t_start, t_stop=t_stop, flags=arrays["flags"],
                 sample_rate=sample_rate, chunk_index=chunk_index,
             )
             chunk_index += 1
             t_start = t_stop
-            buf_sig = buf_sig[chunk_n:]
-            buf_ra  = buf_ra[chunk_n:]  if buf_ra  is not None else None
-            buf_dec = buf_dec[chunk_n:] if buf_dec is not None else None
-            buf_rb  = buf_rb[chunk_n:]
-            buf_db  = buf_db[chunk_n:]
-            buf_bq  = buf_bq[chunk_n:]  if buf_bq  is not None else None
-            buf_flags = buf_flags[chunk_n:]
 
-    if buf_sig is not None and buf_sig.shape[0] > 0:
+    if pending_samples > 0:
         assert kids is not None and sample_rate is not None and t_start is not None
-        n      = buf_sig.shape[0]
+        n = pending_samples
+        arrays = take_samples(n)
         t_stop = t_start + n / sample_rate
         yield Chunk(
-            kids=kids, signal=buf_sig, common_mode=None,
-            ra=buf_ra, dec=buf_dec,
-            ra_bore=buf_rb, dec_bore=buf_db,
-            boresight_q=buf_bq,
+            kids=kids, signal=arrays["signal"], common_mode=None,
+            ra=arrays["ra"], dec=arrays["dec"],
+            ra_bore=arrays["ra_bore"], dec_bore=arrays["dec_bore"],
+            boresight_q=arrays["boresight_q"],
             det_dirs=det_dirs,
-            t_start=t_start, t_stop=t_stop,flags=buf_flags,
+            t_start=t_start, t_stop=t_stop, flags=arrays["flags"],
             sample_rate=sample_rate, chunk_index=chunk_index,
         )
 
@@ -284,10 +364,13 @@ def _iter_h5_lab_frames(files: list, apply_offsets: bool = True) -> Iterator[Chu
 
 # ============================================================================ #
 # _iter_h5_lab_chunks
-def _iter_h5_lab_chunks(files: list, chunk_duration_s: float, apply_offsets: bool = True) -> Iterator[Chunk]:
+def _iter_h5_lab_chunks(
+        files: list, chunk_duration_s: float | str,
+        apply_offsets: bool = True, pipeline_cfg: dict | None = None
+        ) -> Iterator[Chunk]:
     """Yield fixed-duration Chunks directly from HDF5 lab files."""
     frame_iter = _iter_h5_lab_frames(files, apply_offsets)
-    return _rechunk(frame_iter, chunk_duration_s)
+    return _rechunk(frame_iter, chunk_duration_s, pipeline_cfg)
 
 
 
@@ -298,6 +381,8 @@ def _precalcChunkTotal(cfg):
     """
 
     if cfg["data"]["format"] != "lab":
+        return {"total_chunks": None}
+    if cfg["pipeline"].get("chunk_duration_s", 1.0) == "auto":
         return {"total_chunks": None}
 
     files = []
@@ -549,7 +634,10 @@ def _load_h5_focalplane(path):
 
 # ============================================================================ #
 # _iter_h5_simulation_chunks
-def _iter_h5_simulation_chunks(files: list, chunk_duration_s: float, apply_offsets: bool = True) -> Iterator[Chunk]:
+def _iter_h5_simulation_chunks(
+        files: list, chunk_duration_s: float | str,
+        apply_offsets: bool = True, pipeline_cfg: dict | None = None
+        ) -> Iterator[Chunk]:
     """
     Yield fixed-duration Chunks directly from HDF5 simulation files.
 
@@ -590,7 +678,21 @@ def _iter_h5_simulation_chunks(files: list, chunk_duration_s: float, apply_offse
             if sample_rate_ref[0] is None:
                 sample_rate_ref[0] = n_samps / (times[-1] - times[0])
             sample_rate = sample_rate_ref[0]
-            chunk_n = max(1, int(chunk_duration_s * sample_rate)) if chunk_duration_s > 0 else n_samps
+            if chunk_duration_s == "auto":
+                if pipeline_cfg is None:
+                    raise ValueError("Automatic chunk sizing requires pipeline configuration")
+                chunk_n = _auto_chunk_samples(
+                    len(det_names), sample_rate, pipeline_cfg)
+                if chunk_index == 0:
+                    print(
+                        f"  Auto chunk size: {chunk_n} samples "
+                        f"({chunk_n / sample_rate:.2f} s)"
+                    )
+            else:
+                chunk_n = (
+                    max(1, int(chunk_duration_s * sample_rate))
+                    if chunk_duration_s > 0 else n_samps
+                )
 
             for start in range(0, n_samps, chunk_n):
                 stop = min(start + chunk_n, n_samps)
@@ -645,20 +747,25 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
         )
     fmt = cfg["data"]["format"]
     chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
+    if isinstance(chunk_duration_s, str) and chunk_duration_s != "auto":
+        raise ValueError("pipeline.chunk_duration_s must be seconds or 'auto'")
+    pipeline_cfg = cfg["pipeline"]
     start_offset_s   = cfg["pipeline"].get("start_offset_s", 0.0)
     max_duration_s   = cfg["pipeline"].get("max_duration_s", None)
 
     if fmt == "lab":
-        chunked_iter = _iter_h5_lab_chunks(files, chunk_duration_s, apply_offsets)
+        chunked_iter = _iter_h5_lab_chunks(
+            files, chunk_duration_s, apply_offsets, pipeline_cfg)
 
     elif fmt == "simulation" and file_fmt == "h5":
         # HDF5 datasets support direct index slicing, so chunks are read
         # straight off disk -- no frame buffering/_rechunk needed here.
-        chunked_iter = _iter_h5_simulation_chunks(files, chunk_duration_s, apply_offsets)
+        chunked_iter = _iter_h5_simulation_chunks(
+            files, chunk_duration_s, apply_offsets, pipeline_cfg)
 
     elif fmt == "simulation":
         frame_iter = _iter_g3_simulation_chunks(files, apply_offsets)
-        chunked_iter = _rechunk(frame_iter, chunk_duration_s)
+        chunked_iter = _rechunk(frame_iter, chunk_duration_s, pipeline_cfg)
     
     else:
         raise NotImplementedError(

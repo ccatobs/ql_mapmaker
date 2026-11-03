@@ -56,12 +56,15 @@ compare_boresight = false
 start_offset_s = 0
 #max_duration_s = 0
 
-# Chunk duration in seconds. Smaller = less memory, larger = better common-mode estimate.
-# 0 or negative = one chunk per G3 frame.
-chunk_duration_s = 1.0
+# Chunk duration in seconds, or "auto" to size chunks from available memory.
+# Auto mode targets chunk_memory_fraction of currently available RAM and uses
+# chunk_memory_gb as an optional upper bound (0 = no explicit cap).
+chunk_duration_s = "auto"
+chunk_memory_fraction = 0.5
+chunk_memory_gb = 0.0
 
-# Samples per map-binning pass. 0 = full timestream at once.
-# Set to ~10000 for the full CCAT array (~40k detectors) to cap peak memory.
+# Legacy setting; not currently consumed. Use chunk_duration_s = "auto" and
+# chunk_memory_* to size processing chunks from available memory.
 time_chunk_size = 0
 
 # ---------------------------------------------------------------- #
@@ -70,16 +73,6 @@ time_chunk_size = 0
 # Common-mode subtraction iterations after the naive map.
 # 0 = naive map only, 3-5 = good balance of quality vs runtime.
 n_iterations = 3
-
-# Ordered list of cleaning steps applied to each chunk's timestream (see
-# mapmaker/cleaning.py CLEAN_STEPS). Available: "cosmic_rays", "highpass",
-# "notch". Add/remove/reorder freely -- each step is self-contained, with its
-# own [pipeline.<step>] config block below; clean_tod() doesn't need touching
-# to add a new step in the future (e.g. step correction).
-# clean_steps = ["highpass"]
-# fill_them_noise = noisy polynomial or linear
-# how many samples (likely 5 samples)
-# build array of sample noise in loading, take varying noise everytime we need it
 
 # ---------------------------------------------------------------- #
 #   Detector exclusion

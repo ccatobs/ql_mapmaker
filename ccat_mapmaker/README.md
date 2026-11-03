@@ -118,8 +118,8 @@ Step 1: First pass (baselines + map centre)...
   Detectors  : 280 @ 200.0 Hz
   Map grid   : 240 x 240 pixels (0.25 arcmin/pixel), centre = (142.0000, 15.6000) [config]
 
-Step 2: Naive map (chunk_duration_s=1.0)...
-Step 2: Initial common-mode pass...
+Step 2: Naive + initial common-mode maps (chunk_duration_s=auto)...
+  Auto chunk size: 4000 samples (20.00 s)
 Step 3: 4 iteration(s)...
   Iteration 1/4... [1.8s]
   ...
@@ -145,6 +145,9 @@ All settings live in `config.toml`. The most commonly changed ones:
 | `n_iterations` | `[pipeline]` | Common-mode subtraction iterations (3-5 is typical) |
 | `start_offset_s` | `[pipeline]` | Skip this many seconds at the start |
 | `max_duration_s` | `[pipeline]` | Process at most this many seconds (comment out for full obs) |
+| `chunk_duration_s` | `[pipeline]` | Fixed chunk duration in seconds, or `"auto"` to size chunks from available memory |
+| `chunk_memory_fraction` | `[pipeline]` | Fraction of available RAM targeted by auto sizing (default `0.5`) |
+| `chunk_memory_gb` | `[pipeline]` | Optional upper bound for the auto chunk-memory target in GiB (`0` means no explicit cap) |
 | `clean_steps` | `[pipeline]` | Ordered list of cleaning steps to run, see below |
 | `auto_exclude_threshold` | `[pipeline]` | Exclude detectors with noise > N x median noise (`0` to disable) |
 | `wnf_exclude_sigma` | `[pipeline]` | Exclude detectors by white-noise-floor outlier, on top of `auto_exclude_threshold` (`0` to disable) |
@@ -153,6 +156,15 @@ All settings live in `config.toml`. The most commonly changed ones:
 | `output_dir` | `[output]` | Where to write outputs |
 
 ## Cleaning steps
+
+Set `chunk_duration_s = "auto"` to estimate the largest processing chunk from
+available memory. Auto sizing applies to every pass, including preparation:
+longer preparation chunks change PSD frequency resolution and may affect
+per-chunk medians, detector noise estimates, and weights. Larger chunks also
+move cleaning boundaries, which can affect gap filling and spike detection.
+The memory estimate is conservative but not a hard process-memory limit;
+input formats that materialize an entire source frame can exceed the target
+for a large frame.
 
 Timestream cleaning runs as an ordered list of self-contained steps:
 
@@ -231,10 +243,9 @@ snakeviz output/<timestamp>/profile.prof
 Each run does the following:
 
 1. **First pass**: scans all data to compute per-detector baselines, white-noise-floor, and (optionally) the map centre.
-2. **Naive map**: bins cleaned signal directly into a map with no common-mode subtraction.
-3. **Initial common-mode pass**: estimates atmospheric noise as the mean across detectors, subtracts it, then rebins.
-4. **Iterative passes**: repeats common-mode subtraction using the previous map as a sky signal prediction, refining the atmosphere estimate each time.
-5. **Save**: writes all maps, diagnostics, and metadata to a timestamped output directory.
+2. **Initial maps**: one data scan produces both the naive map and the initial common-mode map, sharing input reads and cleaning.
+3. **Iterative passes**: repeats common-mode subtraction using the previous map as a sky signal prediction, refining the atmosphere estimate each time.
+4. **Save**: writes all maps, diagnostics, and metadata to a timestamped output directory.
 
 ## Output files
 
@@ -295,4 +306,5 @@ Check that `input_dirs` in `config.toml` points to a directory that contains fil
 Try omitting `ra0_deg` / `dec0_deg` / `target` so the mapmaker auto-detects the centre, or increase `xlen_deg` / `ylen_deg`.
 
 **Run is slow**
-Reduce `max_duration_s` to process a shorter time window, or reduce `n_iterations`. For memory issues with large arrays, set `time_chunk_size` to ~10000.
+Reduce `max_duration_s` to process a shorter time window, reduce `n_iterations`,
+or set `chunk_duration_s = "auto"` and adjust the memory target.

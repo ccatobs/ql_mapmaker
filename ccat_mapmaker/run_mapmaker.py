@@ -1030,7 +1030,7 @@ def main():
     state_2 = _makeMaps(cfgs, state_1)
 
     print()
-    print(f"Step 3 ({cfgs["pipeline"]["n_iterations"]} iteration(s))")
+    print(f"Step 3 ({cfgs['pipeline']['n_iterations']} iteration(s))")
 
     # STEP 3: Iterate to produce a better common mode estimation
     state_3 = _makeIterativeMaps(cfgs, state_1, state_2)

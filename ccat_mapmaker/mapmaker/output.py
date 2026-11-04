@@ -145,19 +145,20 @@ def save_per_detector_maps(kids: list, det_data: np.ndarray, det_hits: np.ndarra
 
 
 # ============================================================================ #
-# save_iteration_maps
+# saveMaps
 # ============================================================================ #
-def save_iteration_maps(naive: np.ndarray,
-                        cm_maps: list[tuple[str, np.ndarray]],
-                        hits: np.ndarray,
-                        noise: np.ndarray,
-                        null: np.ndarray,
-                        ra_edges: np.ndarray, dec_edges: np.ndarray,
-                        output_dir: pathlib.Path,
-                        out_cfg: dict,
-                        detsplit_null: np.ndarray = None):
-    """
-    Save naive map, CM iteration maps, hits, noise, and null to disk.
+def saveMaps(
+        naive: np.ndarray,
+        cm_maps: list[tuple[str, np.ndarray]],
+        hits: np.ndarray,
+        noise: np.ndarray,
+        null: np.ndarray,
+        ra_edges: np.ndarray, dec_edges: np.ndarray,
+        output_dir: pathlib.Path,
+        out_cfg: dict,
+        detsplit_null: np.ndarray = None
+        ):
+    """Save naive map, CM iteration maps, hits, noise, and null to disk.
 
     noise: per-pixel RMS of the mean, from the actual sample scatter
            (E[x^2] - E[x]^2) / hits, see run_mapmaker._streaming_pass.
@@ -173,6 +174,7 @@ def save_iteration_maps(naive: np.ndarray,
     Grid layout: naive + all CM iterations in the top rows, hits + noise +
     null below.
     """
+
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -188,56 +190,57 @@ def save_iteration_maps(naive: np.ndarray,
             np.save(output_dir / f"{label}.npy", m)
         np.save(output_dir / "ra_edges.npy",  ra_edges)
         np.save(output_dir / "dec_edges.npy", dec_edges)
-        print(f"    Saved {len(all_maps)} .npy files")
 
     if out_cfg.get("save_png", True):
         signal_maps = [("naive", naive)] + cm_maps
-        sig_vmin, sig_vmax   = _global_scale(signal_maps)
+        sig_vmin, sig_vmax = _global_scale(signal_maps)
         hits_vmin, hits_vmax = _percentile_scale(hits)
         noise_vmin, noise_vmax = _percentile_scale(noise)
 
         for label, m in signal_maps:
-            _plot_map(m, ra_edges, dec_edges,
-                      filepath=output_dir / f"{label}.png",
-                      title=_pretty_title(label),
-                      cmap=CMAP_SIGNAL, vmin=sig_vmin, vmax=sig_vmax,
-                      cbar_label="Signal")
+            _plot_map(
+                m, ra_edges, dec_edges,
+                filepath=output_dir / f"{label}.png",
+                title=_pretty_title(label),
+                cmap=CMAP_SIGNAL, vmin=sig_vmin, vmax=sig_vmax,
+                cbar_label="Signal")
 
         if null is not None:
             null_vmin, null_vmax = _global_scale([("null", null)])
-            _plot_map(null, ra_edges, dec_edges,
-                      filepath=output_dir / "time_null.png",
-                      title="Null Map (time chunk half-difference)",
-                      cmap=CMAP_NULL, vmin=null_vmin, vmax=null_vmax,
-                      cbar_label="Signal")
+            _plot_map(
+                null, ra_edges, dec_edges,
+                filepath=output_dir / "time_null.png",
+                title="Null Map (time chunk half-difference)",
+                cmap=CMAP_NULL, vmin=null_vmin, vmax=null_vmax,
+                cbar_label="Signal")
         if detsplit_null is not None:
             ds_vmin, ds_vmax = _global_scale([("detsplit_null", detsplit_null)])
-            _plot_map(detsplit_null, ra_edges, dec_edges,
-                      filepath=output_dir / "detsplit_null.png",
-                      title="Null Map (random detector-split half-difference)",
-                      cmap=CMAP_NULL, vmin=ds_vmin, vmax=ds_vmax,
-                      cbar_label="Signal")
-        _plot_map(hits, ra_edges, dec_edges,
-                  filepath=output_dir / "hits.png",
-                  title="Hit Map",
-                  cmap=CMAP_HITS, vmin=hits_vmin, vmax=hits_vmax,
-                  cbar_label="Samples per pixel")
-        _plot_map(noise, ra_edges, dec_edges,
-                  filepath=output_dir / "noise.png",
-                  title="Noise Map",
-                  cmap=CMAP_HITS, vmin=noise_vmin, vmax=noise_vmax,
-                  cbar_label="RMS of pixel mean")
+            _plot_map(
+                detsplit_null, ra_edges, dec_edges,
+                filepath=output_dir / "detsplit_null.png",
+                title="Null Map (random detector-split half-difference)",
+                cmap=CMAP_NULL, vmin=ds_vmin, vmax=ds_vmax,
+                cbar_label="Signal")
+        _plot_map(
+            hits, ra_edges, dec_edges,
+            filepath=output_dir / "hits.png",
+            title="Hit Map",
+            cmap=CMAP_HITS, vmin=hits_vmin, vmax=hits_vmax,
+            cbar_label="Samples per pixel")
+        _plot_map(
+            noise, ra_edges, dec_edges,
+            filepath=output_dir / "noise.png",
+            title="Noise Map",
+            cmap=CMAP_HITS, vmin=noise_vmin, vmax=noise_vmax,
+            cbar_label="RMS of pixel mean")
 
-        print(f"    Saved {len(all_maps)} individual PNGs")
-        print(f"      Signal scale : {sig_vmin:.3f} - {sig_vmax:.3f}")
-
-        _plot_overview_grid(naive, cm_maps, hits, noise,
-                            ra_edges, dec_edges,
-                            filepath=output_dir / "overview.png",
-                            sig_vmin=sig_vmin, sig_vmax=sig_vmax,
-                            hits_vmin=hits_vmin, hits_vmax=hits_vmax,
-                            noise_vmin=noise_vmin, noise_vmax=noise_vmax)
-        print("    Saved overview.png")
+        _plot_overview_grid(
+            naive, cm_maps, hits, noise,
+            ra_edges, dec_edges,
+            filepath=output_dir / "overview.png",
+            sig_vmin=sig_vmin, sig_vmax=sig_vmax,
+            hits_vmin=hits_vmin, hits_vmax=hits_vmax,
+            noise_vmin=noise_vmin, noise_vmax=noise_vmax)
 
 
 # ============================================================================ #

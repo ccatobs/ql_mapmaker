@@ -75,11 +75,11 @@ def _loadConfiguration(config_path_str: str) -> tuple[dict, pathlib.Path]:
         cfg = toml.load(f)
     cfg = _resolvePaths(cfg, config_path)
 
-    print(f"Config : {config_path}")
+    print(f" Config : {config_path}")
     for d in cfg['data']['input_dirs']:
         print(f" Input  : {d}")
     print(f" Format : {cfg['data']['format']}")
-    print(f" Output : {cfg['output']['output_dir']}\n")
+    print(f" Output : {cfg['output']['output_dir']}")
 
     return cfg
 
@@ -612,8 +612,6 @@ def _mapPrep(cfg: dict) -> dict:
     5. Sets up the spatial pixel grid edges.
     """
 
-    print(f"Step 1 (preparation)")
-
     t0 = time.perf_counter()
     t = t0
     
@@ -704,8 +702,6 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
     - Null map (difference between two random samples of kids).
     """
 
-    print(f"Step 2 (map making)")
-
     pipe_cfg = cfg["pipeline"]
     chunk_s = pipe_cfg.get("chunk_duration_s", 1.0)
 
@@ -749,8 +745,6 @@ def _makeIterativeMaps(
 
     if n_iters > 0:
 
-        print(f"Step 3: ({n_iters} iteration(s))")
-
         for i in range(1, n_iters + 1):
             t = time.perf_counter()
 
@@ -776,17 +770,15 @@ def _makeIterativeMaps(
     }
 
 
-
-
 # ============================================================================ #
-# STEP 4: OUTPUT SAVING & METADATA
-# ============================================================================ #
-
-
-# ============================================================================ #
-#   _build_metadata
-def _build_metadata(cfg: dict, step1_res: dict, cm_maps: list, pass_times: list,
-                    metrics: dict, timestamp: str, elapsed: float) -> dict:
+# _buildMetadata
+def _buildMetadata(
+        cfg: dict, step1_res: dict, cm_maps: list, 
+        pass_times: list, metrics: dict, timestamp: str, elapsed: float
+        ) -> dict:
+    """
+    """
+    
     pipe_cfg = cfg["pipeline"]
     map_cfg = cfg["map"]
     obs_info = step1_res["obs_info"]
@@ -846,54 +838,66 @@ def _build_metadata(cfg: dict, step1_res: dict, cm_maps: list, pass_times: list,
 
 
 # ============================================================================ #
-#   step_4_save_outputs
-def step_4_save_outputs(
-        cfg: dict, step1_res: dict, step2_res: dict,
-        cm_maps: list, pass_times: list, t_total: float
+# _saveOutputs
+def _saveOutputs(
+        cfg:dict, state_1:dict, state_2:dict, state_3:dict, t_total:float
         ) -> tuple[str, dict]:
+    """
+    """
     
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    n_dets = step1_res["obs_info"]["n_detectors"]
-    out_dir = os.path.join(pathlib.Path(cfg["output"]["output_dir"]),
-                           f'{cfg["output"]["obs_object"]}_d{n_dets}_{timestamp}')
+    n_dets = state_1["obs_info"]["n_detectors"]
+    out_dir = os.path.join(
+        pathlib.Path(cfg["output"]["output_dir"]),
+        f'{cfg["output"]["obs_object"]}_d{n_dets}_{timestamp}')
 
-    output.save_iteration_maps(
-        step2_res["naive"], cm_maps, step2_res["hits"], step2_res["noise_map"],
-        step2_res["null_map"], step1_res["ra_edges"], step1_res["dec_edges"],
-        out_dir, cfg["output"], detsplit_null=step2_res["detsplit_null_map"]
+    output.saveMaps(
+        state_2["naive"], state_3['cm_maps'], 
+        state_2["hits"], state_2["noise_map"], state_2["null_map"], 
+        state_1["ra_edges"], state_1["dec_edges"],
+        out_dir, cfg["output"], detsplit_null=state_2["detsplit_null_map"]
     )
 
-    output.plot_wnf_diagnostic(
-        step1_res["white_noise_floor"], step1_res["wnf_cutoff"],
-        cfg["pipeline"].get("wnf_exclude_sigma", 3.0),
-        os.path.join(out_dir, "wnf_diagnostic.png")
-    )
-    print("    Saved wnf_diagnostic.png")
+    print(" | Saved maps")
 
-    metrics = output.compute_convergence_metrics(step2_res["naive"], cm_maps, step2_res["hits"])
-    output.plot_diagnostics(metrics, pass_times, os.path.join(out_dir, "diagnostics.png"))
-    print("    Saved diagnostics.png")
+    # output.plot_wnf_diagnostic(
+    #     step1_res["white_noise_floor"], step1_res["wnf_cutoff"],
+    #     cfg["pipeline"].get("wnf_exclude_sigma", 3.0),
+    #     os.path.join(out_dir, "wnf_diagnostic.png")
+    # )
+    # print(" | Saved wnf_diagnostic.png")
 
-    output.plot_psd(
-        step2_res["raw_sample"]["raw"], step2_res["cm_sample"]["cm"],
-        step2_res["sr"], os.path.join(out_dir, "psd.png")
-    )
-    print("    Saved psd.png")
+    metrics = output.compute_convergence_metrics(
+        state_2["naive"], state_3['cm_maps'], state_2["hits"])
+    output.plot_diagnostics(
+        metrics, state_3['pass_times'], 
+        os.path.join(out_dir, "diagnostics.png"))
+    
+    print(" | Saved diagnostics")
 
-    output.plot_tod_rms(step2_res["tod_rms_data"], os.path.join(out_dir, "tod_rms.png"))
-    print("    Saved tod_rms.png")
+    # output.plot_psd(
+    #     step2_res["raw_sample"]["raw"], step2_res["cm_sample"]["cm"],
+    #     step2_res["sr"], os.path.join(out_dir, "psd.png")
+    # )
+    # print("    Saved psd.png")
 
-    print("  Convergence summary:")
-    for label, peak, rms, diff in zip(
-        metrics["labels"], metrics["peak"],
-        metrics["off_src_rms"], metrics["map_diff_rms"]
-    ):
-        diff_str = f"  map_diff={diff:.4f}" if not np.isnan(diff) else ""
-        print(f"    {label:12s}  peak={peak:.4f}  off_src_rms={rms:.4f}{diff_str}")
+    # output.plot_tod_rms(step2_res["tod_rms_data"], os.path.join(out_dir, "tod_rms.png"))
+    # print("    Saved tod_rms.png")
 
+    # print("  Convergence summary:")
+    # for label, peak, rms, diff in zip(
+    #     metrics["labels"], metrics["peak"],
+    #     metrics["off_src_rms"], metrics["map_diff_rms"]
+    # ):
+    #     diff_str = f"  map_diff={diff:.4f}" if not np.isnan(diff) else ""
+    #     print(f"    {label:12s}  peak={peak:.4f}  off_src_rms={rms:.4f}{diff_str}")
+
+    # Metadata
     elapsed = time.perf_counter() - t_total
-    metadata = _build_metadata(cfg, step1_res, cm_maps, pass_times, metrics, timestamp, elapsed)
+    metadata = _buildMetadata(cfg, state_1, state_3['cm_maps'], state_3['pass_times'], metrics, timestamp, elapsed)
     output.save_metadata(metadata, out_dir)
+
+    print(" | Saved metadata")
 
     return out_dir, metadata
 
@@ -1004,6 +1008,9 @@ def main():
     cfgs = _loadConfiguration(args.config)
     cfgs |= reader._precalcChunkTotal(cfgs) # if possible ("lab" only right now)
 
+    print()
+    print(f"Step 1 (preparation)")
+
     # STEP 1: A single data pass to prepare for map making.
     # - Executes the first data pass to gather baselines, noise, and PSD.
     # - Determine excluded detectors.
@@ -1013,6 +1020,7 @@ def main():
     state_1 = _mapPrep(cfgs)
 
     print()
+    print(f"Step 2 (map making)")
 
     # STEP 2: One data pass builds both initial maps.
     # - 'naive' first map and common-mode-removed map.
@@ -1022,31 +1030,30 @@ def main():
     state_2 = _makeMaps(cfgs, state_1)
 
     print()
+    print(f"Step 3 ({cfgs["pipeline"]["n_iterations"]} iteration(s))")
 
     # STEP 3: Iterate to produce a better common mode estimation
     state_3 = _makeIterativeMaps(cfgs, state_1, state_2)
 
     print()
-
-        #     'combined_map': combined_map,
-        # 'cm_maps': cm_maps,
-        # 'pass_times': pass_times,
+    print(f"Step 4 (save outputs)")
 
     # TODO: audit from here
 
-    out_dir, metadata = step_4_save_outputs(
-        cfgs, state_1, state_2, 
-        state_3['cm_maps'], state_3['pass_times'], t_total)
+    out_dir, metadata = _saveOutputs(
+        cfgs, state_1, state_2, state_3, t_total)
+        
 
-    print()
+    # print()
 
-    step_5_boresight_comparison(cfgs, state_1, state_3['combined_map'], out_dir)
+    # step_5_boresight_comparison(cfgs, state_1, state_3['combined_map'], out_dir)
 
-    print()
+    # print()
 
     # step_6_per_detector_maps(cfgs, state_1, pd_results, out_dir, metadata)
 
     print()
+    # print(f"Step 4 (save outputs)")
 
     finish_run(args, prof, out_dir, time.perf_counter() - t_total)
 

@@ -22,8 +22,8 @@ format = "lab"
 
 # Map centre in celestial coordinates (degrees).
 # Priority: ra0_deg/dec0_deg (if both set) > target > auto (mean boresight).
-ra0_deg  = 229.663
-dec0_deg = -56.649
+# ra0_deg  = 229.663
+# dec0_deg = -56.649
 # 229.663, -56.649: RCW 92's SIMBAD J2000 position (15h18m39.1s, -56d38'49")
 
 # Alternative to manual ra0_deg/dec0_deg: resolve the centre from a name. Ignored while ra0_deg/dec0_deg above are both set, comment those out to use this.

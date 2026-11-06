@@ -48,9 +48,13 @@ def makeMapEdges(
 
 # ============================================================================
 # requireMapCoverage
-def requireMapCoverage(hits: np.ndarray,
-                       ra_edges: np.ndarray, dec_edges: np.ndarray) -> None:
-    """Raise an actionable error if no usable samples landed inside the map."""
+def requireMapCoverage(
+        hits: np.ndarray,
+        ra_edges: np.ndarray, dec_edges: np.ndarray
+        ) -> None:
+    """Raise an actionable error if no usable samples landed inside the map.
+    """
+
     if np.any(hits > 0):
         return
 

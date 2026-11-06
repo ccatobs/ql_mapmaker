@@ -139,7 +139,7 @@ max_width = 5 # Max spike width to be considered cosmic ray.
 output_dir = "output"
 obs_object = "RCW92"
 save_numpy = true
-save_png   = true
+save_png   = false
 
 # ---------------------------------------------------------------- #
 # per_detector

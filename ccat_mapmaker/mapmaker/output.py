@@ -265,23 +265,37 @@ def compute_convergence_metrics(naive: np.ndarray,
     all_maps = [("naive", naive)] + cm_maps
     final_map = cm_maps[-1][1] if cm_maps else naive
 
-    valid      = hits > 0
-    threshold  = np.nanpercentile(final_map[valid], 50)
-    off_source = valid & (final_map < threshold)
-    on_source = valid & (final_map >= threshold)
+    hit_pixels = hits > 0
+    valid = hit_pixels & np.isfinite(final_map)
+    if valid.any():
+        threshold = np.percentile(final_map[valid], 50)
+        off_source = valid & (final_map < threshold)
+        on_source = valid & (final_map >= threshold)
+    else:
+        off_source = np.zeros(hits.shape, dtype=bool)
+        on_source = np.zeros(hits.shape, dtype=bool)
 
     labels, peaks, rms_vals_off, rms_vals_on, diff_rms = [], [], [], [], []
     prev = None
     for label, m in all_maps:
         labels.append(label)
-        peaks.append(float(np.nanmax(m)))
-        rms_vals_off.append(float(np.sqrt(np.nanmean(m[off_source] ** 2))))
-        rms_vals_on.append(float(np.sqrt(np.nanmean(m[on_source] ** 2))))
+        finite = np.isfinite(m)
+        peaks.append(float(np.max(m[finite])) if finite.any() else float("nan"))
+
+        off_values = m[off_source & finite]
+        on_values = m[on_source & finite]
+        rms_vals_off.append(
+            float(np.sqrt(np.mean(off_values ** 2))) if off_values.size else float("nan"))
+        rms_vals_on.append(
+            float(np.sqrt(np.mean(on_values ** 2))) if on_values.size else float("nan"))
+
         if prev is None:
             diff_rms.append(float("nan"))
         else:
-            diff = m - prev
-            diff_rms.append(float(np.sqrt(np.nanmean(diff[valid] ** 2))))
+            diff_valid = hit_pixels & finite & np.isfinite(prev)
+            diff = m[diff_valid] - prev[diff_valid]
+            diff_rms.append(
+                float(np.sqrt(np.mean(diff ** 2))) if diff.size else float("nan"))
         prev = m
 
     return dict(labels=labels, peak=peaks, off_src_rms=rms_vals_off, on_src_rms=rms_vals_on, map_diff_rms=diff_rms)
@@ -387,12 +401,18 @@ def plot_diagnostics(metrics: dict, pass_times: list[tuple[str, float]],
                  fontsize=14, fontweight="bold")
 
     def _line(ax, y, title, ylabel, color):
-        finite = [(i, v) for i, v in enumerate(y) if not (isinstance(v, float) and np.isnan(v))]
-        xi, yi = zip(*finite)
-        ax.plot(xi, yi, "o-", color=color, linewidth=2, markersize=7)
-        for i, v in finite:
-            ax.annotate(f"{v:.3g}", (i, v), textcoords="offset points",
-                        xytext=(0, 8), ha="center", fontsize=FONT_TICK)
+        values = np.asarray(y, dtype=float)
+        finite = np.isfinite(values)
+        if finite.any():
+            xi = np.flatnonzero(finite)
+            yi = values[finite]
+            ax.plot(xi, yi, "o-", color=color, linewidth=2, markersize=7)
+            for i, v in zip(xi, yi):
+                ax.annotate(f"{v:.3g}", (i, v), textcoords="offset points",
+                            xytext=(0, 8), ha="center", fontsize=FONT_TICK)
+        else:
+            ax.text(0.5, 0.5, "No finite data", transform=ax.transAxes,
+                    ha="center", va="center", color="#777777")
         ax.set_xticks(x)
         ax.set_xticklabels([_pretty_title(l) for l in labels],
                            rotation=20, ha="right", fontsize=FONT_TICK)

@@ -46,6 +46,23 @@ def makeMapEdges(
     }
 
 
+# ============================================================================
+# requireMapCoverage
+def requireMapCoverage(hits: np.ndarray,
+                       ra_edges: np.ndarray, dec_edges: np.ndarray) -> None:
+    """Raise an actionable error if no usable samples landed inside the map."""
+    if np.any(hits > 0):
+        return
+
+    raise ValueError(
+        "No usable TOD samples landed inside the requested map bounds "
+        f"(RA {ra_edges[0]:.6f} to {ra_edges[-1]:.6f} deg, "
+        f"Dec {dec_edges[0]:.6f} to {dec_edges[-1]:.6f} deg). "
+        "Check the map center and extent, pointing coordinates, detector "
+        "selection, and input flags."
+    )
+
+
 # ============================================================================ #
 # bin_detector
 # This is only really used for the per detector maps right now

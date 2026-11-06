@@ -515,6 +515,7 @@ def _mapPass(
                 detsplit_hits[dhalf] += h_ds
 
     _printLoadingBar(clear=True)
+    map.requireMapCoverage(total_hits, state_1["ra_edges"], state_1["dec_edges"])
 
     # Create the total maps
     with np.errstate(invalid='ignore', divide='ignore'):

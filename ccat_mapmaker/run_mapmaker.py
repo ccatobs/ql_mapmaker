@@ -515,6 +515,8 @@ def _mapPass(
                 detsplit_hits[dhalf] += h_ds
 
     _printLoadingBar(clear=True)
+
+    # 
     map.requireMapCoverage(total_hits, state_1["ra_edges"], state_1["dec_edges"])
 
     # Create the total maps
@@ -1019,6 +1021,8 @@ def main():
     # - Resolves the map center.
     # - Sets up the spatial pixel grid edges.
     state_1 = _mapPrep(cfgs)
+
+    hgh
 
     print()
     print(f"Step 2 (map making)")

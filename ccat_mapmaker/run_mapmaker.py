@@ -1022,8 +1022,6 @@ def main():
     # - Sets up the spatial pixel grid edges.
     state_1 = _mapPrep(cfgs)
 
-    hgh
-
     print()
     print(f"Step 2 (map making)")
 

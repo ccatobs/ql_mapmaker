@@ -91,10 +91,15 @@ The default config path is `config.toml` relative to the working directory.
 Each run creates a timestamped subdirectory under `ccat_mapmaker/output/`, e.g.:
 
 ```
-ccat_mapmaker/output/2024-07-08_14-32-01/
+ccat_mapmaker/output/RCW92_d280_2024-07-08_14-32-01/
 ```
 
 Open `overview.png` first, it shows all pipeline maps side by side.
+The configured output directory also contains a timestamped `run_*.log` file
+with the resolved configuration, major pipeline stages, timings, and any
+traceback if a run fails. Chunk-level progress remains on the console only to
+keep log writing lightweight. Failed runs still leave their log in the output
+directory.
 
 ## What you'll see when it runs
 
@@ -125,7 +130,8 @@ Step 3: 4 iteration(s)...
   ...
 
 Total time : 18.3s
-Maps saved : ccat_mapmaker/output/2024-07-08_14-32-01/
+Maps saved : ccat_mapmaker/output/RCW92_d280_2024-07-08_14-32-01/
+Log saved  : ccat_mapmaker/output/run_2024-07-08_14-32-01.log
 ============================================================
 ```
 
@@ -263,6 +269,7 @@ Each run does the following:
 | `diagnostics.png` | Peak signal, off-source RMS, convergence, and runtime per pass |
 | `psd.png` | Timestream PSD before vs. after common-mode subtraction |
 | `metadata.json` | Full run parameters, observation info, convergence metrics, and any flagged `psd_anomalies` |
+| `run_*.log` | Timestamped run log in the configured output directory (also retained for failed runs) |
 | `boresight_comparison.png` | Focal plane offset comparison (if `compare_boresight = true`) |
 | `per_detector/centroids.json` | Per-detector peak RA/Dec centroids (if per-detector maps enabled) |
 

@@ -26,10 +26,12 @@ import io
 import sys
 import time
 import math
+import logging
 import pstats
 import pathlib
 import argparse
 import cProfile
+import pprint
 import numpy as np
 from scipy.signal import welch
 from scipy.ndimage import gaussian_filter
@@ -43,6 +45,8 @@ from mapmaker import map
 from mapmaker import coord
 from mapmaker import output
 from mapmaker import reader
+
+LOGGER = logging.getLogger("ccat_mapmaker")
 
 
 # ============================================================================ #
@@ -110,6 +114,19 @@ def _setupProfiler(args):
         profiler.enable()
         
     return profiler
+
+
+def _setupRunLogger(log_path: pathlib.Path):
+    """Write detailed run diagnostics to a file, without logging per chunk."""
+    LOGGER.setLevel(logging.DEBUG)
+    LOGGER.propagate = False
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    LOGGER.addHandler(handler)
+    return handler
 
 
 
@@ -749,6 +766,7 @@ def _makeIterativeMaps(
     if n_iters > 0:
 
         for i in range(1, n_iters + 1):
+            LOGGER.info("Iteration %d/%d started", i, n_iters)
             t = time.perf_counter()
 
             s_sp = _mapPass(
@@ -759,6 +777,7 @@ def _makeIterativeMaps(
 
             t_iter = time.perf_counter() - t
             print(f" | Iteration {i}/{n_iters} [{t_iter:.1f}s]")
+            LOGGER.info("Iteration %d/%d complete in %.1f s", i, n_iters, t_iter)
 
             cm_maps.append((f"it_{i}", combined_map.copy()))
             pass_times.append((f"it_{i}", t_iter))
@@ -843,17 +862,13 @@ def _buildMetadata(
 # ============================================================================ #
 # _saveOutputs
 def _saveOutputs(
-        cfg:dict, state_1:dict, state_2:dict, state_3:dict, t_total:float
-        ) -> tuple[str, dict]:
+        cfg:dict, state_1:dict, state_2:dict, state_3:dict, t_total:float,
+        timestamp: str, out_dir: pathlib.Path,
+        ) -> tuple[pathlib.Path, dict]:
     """
     """
-    
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    n_dets = state_1["obs_info"]["n_detectors"]
-    out_dir = os.path.join(
-        pathlib.Path(cfg["output"]["output_dir"]),
-        f'{cfg["output"]["obs_object"]}_d{n_dets}_{timestamp}')
 
+    LOGGER.info("Writing map arrays and images to %s", out_dir)
     output.saveMaps(
         state_2["naive"], state_3['cm_maps'], 
         state_2["hits"], state_2["noise_map"], state_2["null_map"], 
@@ -872,6 +887,7 @@ def _saveOutputs(
 
     metrics = output.compute_convergence_metrics(
         state_2["naive"], state_3['cm_maps'], state_2["hits"])
+    LOGGER.info("Computing convergence metrics and diagnostics plot")
     output.plot_diagnostics(
         metrics, state_3['pass_times'], 
         os.path.join(out_dir, "diagnostics.png"))
@@ -898,6 +914,7 @@ def _saveOutputs(
     # Metadata
     elapsed = time.perf_counter() - t_total
     metadata = _buildMetadata(cfg, state_1, state_3['cm_maps'], state_3['pass_times'], metrics, timestamp, elapsed)
+    LOGGER.info("Writing metadata.json")
     output.save_metadata(metadata, out_dir)
 
     print(" | Saved metadata")
@@ -968,10 +985,12 @@ def step_6_per_detector_maps(cfg: dict, step1_res: dict, pd_results: tuple | Non
 
 # ============================================================================ #
 #   finish_run
-def finish_run(args, profiler: cProfile.Profile, out_dir: str, elapsed: float) -> None:
+def finish_run(args, profiler: cProfile.Profile, out_dir: str,
+               elapsed: float, log_path: pathlib.Path) -> None:
     print()
     print(f"Total time : {elapsed:.1f}s")
     print(f"Maps saved : {out_dir}/")
+    print(f"Log saved  : {log_path}")
     print("=" * 60)
 
     if args.profile:
@@ -1009,56 +1028,82 @@ def main():
     args = _setupArgParser()
     prof = _setupProfiler(args)
     cfgs = _loadConfiguration(args.config)
-    cfgs |= reader._precalcChunkTotal(cfgs) # if possible ("lab" only right now)
 
-    print()
-    print(f"Step 1 (preparation)")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_root = pathlib.Path(cfgs["output"]["output_dir"])
+    output_root.mkdir(parents=True, exist_ok=True)
+    log_path = output_root / f"run_{timestamp}.log"
+    out_dir = output_root
+    log_handler = _setupRunLogger(log_path)
+    LOGGER.info("Starting mapmaking run")
+    LOGGER.info("Configuration file: %s", pathlib.Path(args.config).resolve())
+    LOGGER.info("Run log: %s", log_path)
 
-    # STEP 1: A single data pass to prepare for map making.
-    # - Executes the first data pass to gather baselines, noise, and PSD.
-    # - Determine excluded detectors.
-    # - Computes inverse-variance detector weights.
-    # - Resolves the map center.
-    # - Sets up the spatial pixel grid edges.
-    state_1 = _mapPrep(cfgs)
+    try:
+        LOGGER.info("Precalculating total chunks where supported")
+        step_start = time.perf_counter()
+        cfgs |= reader._precalcChunkTotal(cfgs) # if possible ("lab" only right now)
+        LOGGER.info(
+            "Chunk-count preparation complete in %.1f s; total_chunks=%s",
+            time.perf_counter() - step_start, cfgs.get("total_chunks", "unknown"),
+        )
+        LOGGER.debug("Run configuration:\n%s", pprint.pformat(cfgs, sort_dicts=True))
 
-    print()
-    print(f"Step 2 (map making)")
+        print()
+        print("Step 1 (preparation)")
+        LOGGER.info("Step 1/4: preparation started")
+        step_start = time.perf_counter()
+        state_1 = _mapPrep(cfgs)
+        step_elapsed = time.perf_counter() - step_start
+        n_dets = state_1["obs_info"]["n_detectors"]
+        out_dir = pathlib.Path(cfgs["output"]["output_dir"]) / (
+            f'{cfgs["output"]["obs_object"]}_d{n_dets}_{timestamp}')
+        LOGGER.info(
+            "Step 1/4: preparation complete in %.1f s; %d/%d detectors kept, "
+            "%d excluded (auto-noise flags=%d, white-noise-floor flags=%d); "
+            "observation duration %.1f s; sample rate %.1f Hz; map %d x %d "
+            "pixels centered at (%.6f, %.6f)",
+            step_elapsed, len(state_1["keep_idx"]), len(state_1["all_kids"]),
+            len(state_1["exclude_set"]), len(state_1["auto_excluded"]),
+            len(state_1["wnf_excluded"]),
+            state_1["obs_info"]["duration_s"],
+            state_1["obs_info"]["sample_rate_hz"], state_1["ny"], state_1["nx"],
+            state_1["ra0_deg"], state_1["dec0_deg"],
+        )
 
-    # STEP 2: One data pass builds both initial maps.
-    # - 'naive' first map and common-mode-removed map.
-    # - Hits map.
-    # - Noise map.
-    # - Null map (difference between two random samples of kids).
-    state_2 = _makeMaps(cfgs, state_1)
+        print()
+        print("Step 2 (map making)")
+        LOGGER.info("Step 2/4: initial map pass started")
+        step_start = time.perf_counter()
+        state_2 = _makeMaps(cfgs, state_1)
+        LOGGER.info("Step 2/4: initial maps complete in %.1f s", time.perf_counter() - step_start)
 
-    print()
-    print(f"Step 3 ({cfgs['pipeline']['n_iterations']} iteration(s))")
+        print()
+        n_iterations = cfgs["pipeline"]["n_iterations"]
+        print(f"Step 3 ({n_iterations} iteration(s))")
+        LOGGER.info("Step 3/4: %d iterative pass(es) starting", n_iterations)
+        step_start = time.perf_counter()
+        state_3 = _makeIterativeMaps(cfgs, state_1, state_2)
+        LOGGER.info("Step 3/4: iterative maps complete in %.1f s", time.perf_counter() - step_start)
 
-    # STEP 3: Iterate to produce a better common mode estimation
-    state_3 = _makeIterativeMaps(cfgs, state_1, state_2)
+        print()
+        print("Step 4 (save outputs)")
+        LOGGER.info("Step 4/4: saving maps and diagnostics")
+        step_start = time.perf_counter()
+        out_dir, metadata = _saveOutputs(
+            cfgs, state_1, state_2, state_3, t_total, timestamp, out_dir)
+        LOGGER.info("Step 4/4: outputs saved in %.1f s", time.perf_counter() - step_start)
 
-    print()
-    print(f"Step 4 (save outputs)")
-
-    # TODO: audit from here
-
-    out_dir, metadata = _saveOutputs(
-        cfgs, state_1, state_2, state_3, t_total)
-        
-
-    # print()
-
-    # step_5_boresight_comparison(cfgs, state_1, state_3['combined_map'], out_dir)
-
-    # print()
-
-    # step_6_per_detector_maps(cfgs, state_1, pd_results, out_dir, metadata)
-
-    print()
-    # print(f"Step 4 (save outputs)")
-
-    finish_run(args, prof, out_dir, time.perf_counter() - t_total)
+        print()
+        finish_run(args, prof, str(out_dir), time.perf_counter() - t_total, log_path)
+        LOGGER.info("Run completed in %.1f s; outputs: %s",
+                    time.perf_counter() - t_total, out_dir)
+    except Exception:
+        LOGGER.exception("Run failed; partial output files, if any, are in %s", out_dir)
+        raise
+    finally:
+        LOGGER.removeHandler(log_handler)
+        log_handler.close()
 
 
 if __name__ == "__main__":

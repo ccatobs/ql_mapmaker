@@ -1023,7 +1023,7 @@ def main():
 
     print(f"{'='*60}\nCCAT Quick-Look Mapmaker\n{'='*60}")
 
-    # SETUP
+    # Setup
     t_total = time.perf_counter()
     args = _setupArgParser()
     prof = _setupProfiler(args)
@@ -1040,6 +1040,8 @@ def main():
     LOGGER.info("Run log: %s", log_path)
 
     try:
+
+        # Precalculate chunk size
         LOGGER.info("Precalculating total chunks where supported")
         step_start = time.perf_counter()
         cfgs |= reader._precalcChunkTotal(cfgs) # if possible ("lab" only right now)
@@ -1049,6 +1051,7 @@ def main():
         )
         LOGGER.debug("Run configuration:\n%s", pprint.pformat(cfgs, sort_dicts=True))
 
+        # Map preparation data pass
         print()
         print("Step 1 (preparation)")
         LOGGER.info("Step 1/4: preparation started")
@@ -1071,6 +1074,7 @@ def main():
             state_1["ra0_deg"], state_1["dec0_deg"],
         )
 
+        # Map making data pass
         print()
         print("Step 2 (map making)")
         LOGGER.info("Step 2/4: initial map pass started")
@@ -1078,6 +1082,7 @@ def main():
         state_2 = _makeMaps(cfgs, state_1)
         LOGGER.info("Step 2/4: initial maps complete in %.1f s", time.perf_counter() - step_start)
 
+        # Map making common mode data passes
         print()
         n_iterations = cfgs["pipeline"]["n_iterations"]
         print(f"Step 3 ({n_iterations} iteration(s))")
@@ -1086,6 +1091,7 @@ def main():
         state_3 = _makeIterativeMaps(cfgs, state_1, state_2)
         LOGGER.info("Step 3/4: iterative maps complete in %.1f s", time.perf_counter() - step_start)
 
+        # Save outputs
         print()
         print("Step 4 (save outputs)")
         LOGGER.info("Step 4/4: saving maps and diagnostics")

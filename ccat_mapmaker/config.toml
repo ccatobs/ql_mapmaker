@@ -7,13 +7,14 @@
 # data
 [data]
 
-input_dirs = ["/home/player1/map_making_vlad/sample_h5"]
+# input_dirs = ["/home/player1/map_making_vlad/sample_h5"]
+input_dirs = ["/home/player1/map_making_vlad/ramses_sim_data/planet_ATMdata_d3426/sim_PCAM280_h5_Jupiter_d3426"]
 
 # "g3", "h5"
 file_format = "h5"
 
 # "simulation", "lab"
-format = "lab" 
+format = "simulation" 
 
 
 # ============================================================================ #
@@ -60,7 +61,7 @@ start_offset_s = 0
 # Auto mode targets chunk_memory_fraction of currently available RAM and uses
 # chunk_memory_gb as an optional upper bound (0 = no explicit cap).
 chunk_duration_s = "auto"
-chunk_memory_fraction = 0.5
+chunk_memory_fraction = 0.5 # of currently available
 chunk_memory_gb = 0.0
 
 # Legacy setting; not currently consumed. Use chunk_duration_s = "auto" and

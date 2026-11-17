@@ -91,15 +91,15 @@ The default config path is `config.toml` relative to the working directory.
 Each run creates a timestamped subdirectory under `ccat_mapmaker/output/`, e.g.:
 
 ```
-ccat_mapmaker/output/RCW92_d280_2024-07-08_14-32-01/
+ccat_mapmaker/output/RCW92_2024-07-08_14-32-01-123456/
 ```
 
-Open `overview.png` first, it shows all pipeline maps side by side.
-The configured output directory also contains a timestamped `run_*.log` file
-with the resolved configuration, major pipeline stages, timings, and any
-traceback if a run fails. Chunk-level progress remains on the console only to
-keep log writing lightweight. Failed runs still leave their log in the output
-directory.
+When PNG output is enabled, open `overview.png` first; it shows the maps side
+by side. Each run directory also contains the original `config.toml`, a
+`run.log`, and `metadata.json` with settings and diagnostics. The directory
+is created before preparation, so failed or interrupted runs retain their log
+and partial metadata. Failures before the configuration can be loaded cannot
+be recorded there. Chunk-level progress remains on the console only.
 
 ## What you'll see when it runs
 
@@ -130,8 +130,8 @@ Step 3: 4 iteration(s)...
   ...
 
 Total time : 18.3s
-Maps saved : ccat_mapmaker/output/RCW92_d280_2024-07-08_14-32-01/
-Log saved  : ccat_mapmaker/output/run_2024-07-08_14-32-01.log
+Maps saved : ccat_mapmaker/output/RCW92_2024-07-08_14-32-01-123456/
+Log saved  : ccat_mapmaker/output/RCW92_2024-07-08_14-32-01-123456/run.log
 ============================================================
 ```
 
@@ -154,7 +154,7 @@ All settings live in `config.toml`. The most commonly changed ones:
 | `chunk_duration_s` | `[pipeline]` | Fixed chunk duration in seconds, or `"auto"` to size chunks from available memory |
 | `chunk_memory_fraction` | `[pipeline]` | Fraction of available RAM targeted by auto sizing (default `0.5`) |
 | `chunk_memory_gb` | `[pipeline]` | Optional upper bound for the auto chunk-memory target in GiB (`0` means no explicit cap) |
-| `clean_steps` | `[pipeline]` | Ordered list of cleaning steps to run, see below |
+| `cosmic_rays`, `highpass`, `notch` | `[pipeline.*]` | Cleaning blocks to enable, see below |
 | `auto_exclude_threshold` | `[pipeline]` | Exclude detectors with noise > N x median noise (`0` to disable) |
 | `wnf_exclude_sigma` | `[pipeline]` | Exclude detectors by white-noise-floor outlier, on top of `auto_exclude_threshold` (`0` to disable) |
 | `weight_cap_factor` | `[pipeline]` | Cap each detector's inverse-variance map weight at N x the median weight (`0` for uniform weighting) |
@@ -172,12 +172,11 @@ The memory estimate is conservative but not a hard process-memory limit;
 input formats that materialize an entire source frame can exceed the target
 for a large frame.
 
-Timestream cleaning runs as an ordered list of self-contained steps:
+Gap filling is always invoked. The main map passes then invoke each cleaning
+step whose configuration block is present, in the fixed order cosmic rays,
+high-pass, notch. The `clean_steps` list does not control these passes.
 
 ```toml
-[pipeline]
-clean_steps = ["highpass"]   # any of: "cosmic_rays", "highpass", "notch"
-
 [pipeline.cosmic_rays]
 sigma = 3.5   # spike threshold, in units of sigma * std(tod)
 n     = 2     # samples masked on each side of a detected spike
@@ -191,7 +190,9 @@ n_harmonics  = 5
 bandwidth_hz = 1.0
 ```
 
-Add, remove, or reorder steps freely, each one has its own `[pipeline.<step>]` block. `cosmic_rays` removes sudden spikes by interpolation, `highpass` removes slow atmospheric drift, and `notch` removes mains-line pickup and its harmonics.
+Add or remove the corresponding blocks to enable or disable steps.
+`cosmic_rays` removes sudden spikes by interpolation, `highpass` removes slow
+atmospheric drift, and `notch` removes mains-line pickup and its harmonics.
 
 Separately, `psd_anomaly_sigma` looks for narrowband features in the timestream PSD that don't fit either category (not at a mains frequency, not atmospheric drift). These aren't removed, just flagged in `metadata.json` for follow-up, since an unexplained line could be a real instrumental effect worth investigating rather than something safe to filter out.
 
@@ -261,17 +262,34 @@ Each run does the following:
 | `naive.npy` / `.png` | Map with no common-mode subtraction |
 | `it_0.npy` / `.png` | After first common-mode pass |
 | `it_N.npy` / `.png` | Map after N common-mode iterations |
-| `hits.npy` / `.png` | Detector samples per pixel |
-| `noise.npy` / `.png` | Per-pixel noise estimate from sample variance |
-| `time_null.npy` / `.png` | Chunk-parity (even/odd) half-difference null map, if `compute_time_null = true` |
+| `hits.npy` / `.png` | Sum of detector weights per pixel; raw sample count only with uniform weights |
+| `noise.npy` / `.png` | Sample-scatter-based estimate; not yet validated as an uncertainty for weighted or correlated samples |
+| `null.npy` / `time_null.png` | Initial-pass chunk-parity half-difference, if `compute_time_null = true` |
 | `detsplit_null.npy` / `.png` | Random 50/50 detector-split half-difference null map, if `compute_detsplit_null = true` |
 | `ra_edges.npy`, `dec_edges.npy` | Pixel grid edges (for loading maps in numpy) |
 | `diagnostics.png` | Peak signal, off-source RMS, convergence, and runtime per pass |
 | `psd.png` | Timestream PSD before vs. after common-mode subtraction |
-| `metadata.json` | Full run parameters, observation info, convergence metrics, and any flagged `psd_anomalies` |
-| `run_*.log` | Timestamped run log in the configured output directory (also retained for failed runs) |
+| `config.toml` | Exact copy of the input configuration |
+| `metadata.json` | Run status, provenance, settings, input manifest, processing and map diagnostics |
+| `run.log` | Run log with timings and errors, including failed runs |
 | `boresight_comparison.png` | Focal plane offset comparison (if `compare_boresight = true`) |
 | `per_detector/centroids.json` | Per-detector peak RA/Dec centroids (if per-detector maps enabled) |
+
+`metadata.json` records the Git commit, branch and dirty flag when available;
+the dirty flag does not capture the uncommitted changes themselves. Missing Git
+information is reported in the log and metadata. Package versions may be null
+if distribution metadata is unavailable. The input manifest distinguishes
+discovered files from files handed to the reader; an opened file need not
+contribute samples to the selected time window.
+
+The preparation counts cover all detectors and yielded chunks. Map-pass flag
+counts cover retained detectors in chunks that were not entirely input-flagged;
+`fully_flagged_chunks` counts the skipped chunks separately. Flag categories
+can overlap. Chunk sizes are time samples per chunk. Convergence's off-source
+RMS uses pixels below the final map's median, not a verified source-free region;
+map quality statistics and null maps are diagnostics, not fidelity tests.
+The null products are from the initial common-mode pass, not the final iteration.
+Non-finite diagnostic values are stored as JSON null.
 
 ### Loading a map in Python
 

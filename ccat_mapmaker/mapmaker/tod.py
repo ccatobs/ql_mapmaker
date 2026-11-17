@@ -290,7 +290,7 @@ def excludedDetectors(
     if noise_thresh > 0 and det_noise is not None and det_noise.size > 0:
         noise_bad_i = _findNoiseExcludes(det_noise, noise_thresh)
         noise_excluded = [all_kids[i] for i in noise_bad_i]
-        exclude_set.update(noise_bad_i.tolist())
+        exclude_set.update(noise_bad_i)
 
     # White Noise Floor (WNF) outlier exclusion
     wnf_sigma = pipe_cfg.get("wnf_exclude_sigma", 3.0)
@@ -301,7 +301,7 @@ def excludedDetectors(
         wnf_excluded = [all_kids[i] for i in wnf_bad_i]
         exclude_set.update(wnf_bad_i)
 
-    keep_idx = np.setdiff1d(all_i, exclude_set, assume_unique=True)
+    keep_idx = np.setdiff1d(all_i, list(exclude_set), assume_unique=True)
 
     # print(f"Using {len(keep_idx)}/{n_total} detectors")
 

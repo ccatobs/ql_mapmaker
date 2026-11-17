@@ -745,6 +745,17 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
         raise FileNotFoundError(
             f"No .{file_fmt} files found for patterns: {cfg['data']['input_dirs']}"
         )
+    cfg["_input_files_discovered"] = [str(path.resolve()) for path in files]
+
+    def track_opened_files(paths):
+        opened = cfg.setdefault("_input_files_opened", [])
+        for path in paths:
+            resolved = str(path.resolve())
+            if resolved not in opened:
+                opened.append(resolved)
+            yield path
+
+    files = track_opened_files(files)
     fmt = cfg["data"]["format"]
     chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
     if isinstance(chunk_duration_s, str) and chunk_duration_s != "auto":

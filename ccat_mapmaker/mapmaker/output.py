@@ -11,6 +11,7 @@
 import json
 import math
 import pathlib
+from datetime import date, datetime, time
 import numpy as np
 
 import matplotlib
@@ -533,11 +534,23 @@ def plot_boresight_comparison(with_offsets: np.ndarray, boresight_only: np.ndarr
 # ============================================================================ #
 def save_metadata(metadata: dict, output_dir: pathlib.Path):
     """Write run metadata to metadata.json."""
+    def json_value(value):
+        if isinstance(value, dict):
+            return {key: json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [json_value(item) for item in value]
+        if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+            return None
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, (date, datetime, time)):
+            return value.isoformat()
+        return value
+
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / "metadata.json", "w") as f:
-        json.dump(metadata, f, indent=2)
-    print("    Saved metadata.json")
+        json.dump(json_value(metadata), f, indent=2, allow_nan=False)
 
 
 # ============================================================================ #

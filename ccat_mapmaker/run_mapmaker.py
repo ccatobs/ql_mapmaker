@@ -32,10 +32,15 @@ import pathlib
 import argparse
 import cProfile
 import pprint
+import copy
+import importlib.metadata
+import inspect
+import platform
+import subprocess
 import numpy as np
 from scipy.signal import welch
 from scipy.ndimage import gaussian_filter
-import tomli as toml # tomllib after python 3.11
+import tomllib as toml
 from datetime import datetime, timedelta, timezone
 
 from spt3g import core # type: ignore
@@ -68,15 +73,15 @@ def _resolvePaths(cfg: dict, config_path: pathlib.Path) -> dict:
 
 # ============================================================================ #
 # _loadConfiguration
-def _loadConfiguration(config_path_str: str) -> tuple[dict, pathlib.Path]:
-    """Load the yaml configuration file.
+def _loadConfiguration(config_path_str: str) -> tuple[dict, bytes]:
+    """Load the TOML configuration file and retain its original bytes.
 
     config_path_str: Absolute or relative path string.
     """
 
     config_path = pathlib.Path(config_path_str)
-    with open(config_path, "rb") as f:
-        cfg = toml.load(f)
+    config_bytes = config_path.read_bytes()
+    cfg = toml.loads(config_bytes.decode("utf-8"))
     cfg = _resolvePaths(cfg, config_path)
 
     print(f" Config : {config_path}")
@@ -85,7 +90,7 @@ def _loadConfiguration(config_path_str: str) -> tuple[dict, pathlib.Path]:
     print(f" Format : {cfg['data']['format']}")
     print(f" Output : {cfg['output']['output_dir']}")
 
-    return cfg
+    return cfg, config_bytes
 
 
 # ============================================================================ #
@@ -127,6 +132,68 @@ def _setupRunLogger(log_path: pathlib.Path):
     ))
     LOGGER.addHandler(handler)
     return handler
+
+
+def _softwareProvenance():
+    versions = {}
+    for package in ("numpy", "scipy", "astropy", "matplotlib", "h5py",
+                    "spt3g", "psutil"):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = None
+
+    provenance = {
+        "python": sys.version, "python_executable": sys.executable,
+        "platform": platform.platform(), "packages": versions,
+    }
+    try:
+        def git(*args):
+            return subprocess.check_output(
+                ["git", "-C", str(pathlib.Path(__file__).resolve().parent), *args],
+                text=True, stderr=subprocess.PIPE, timeout=10).strip()
+
+        provenance["git"] = {
+            "commit": git("rev-parse", "HEAD"),
+            "branch": git("branch", "--show-current") or None,
+            "dirty": bool(git("status", "--porcelain", "--untracked-files=normal")),
+        }
+    except (OSError, subprocess.SubprocessError) as exc:
+        provenance["git"] = {"error": str(exc)}
+    return provenance
+
+
+def _effectiveSettings(cfg):
+    """Record defaults used by the main map passes, without changing behavior."""
+    settings = copy.deepcopy(cfg)
+    pipe = settings["pipeline"]
+    for key, value in {
+        "start_offset_s": 0.0, "max_duration_s": None,
+        "chunk_duration_s": 1.0, "chunk_memory_fraction": 0.5,
+        "chunk_memory_gb": 0.0, "auto_exclude_threshold": 5.0,
+        "wnf_exclude_sigma": 3.0, "weight_cap_factor": 5.0,
+        "compute_time_null": True, "compute_detsplit_null": True,
+        "exclude_detectors": [], "exclude_detector_indices": [],
+    }.items():
+        pipe.setdefault(key, value)
+    for key, value in {"save_numpy": True, "save_png": True}.items():
+        settings["output"].setdefault(key, value)
+    return settings
+
+
+def _activeCleaningSteps(pipe):
+    steps = [{"name": "gap_fill", "parameters": {"min_cubic_gap": 4}}]
+    for name, function in (("cosmic_rays", tod._removeCosmicRays),
+                           ("highpass", tod._highpassFilter),
+                           ("notch", tod._notchFilter)):
+        if pipe.get(name) is not None:
+            defaults = {
+                key: param.default for key, param in inspect.signature(function).parameters.items()
+                if param.default is not inspect.Parameter.empty
+            }
+            defaults.update(pipe[name])
+            steps.append({"name": name, "parameters": defaults})
+    return steps
 
 
 
@@ -273,12 +340,18 @@ def _prepPass(cfg: dict):
 
     # Stream through chunks of time-ordered data (TOD)
     init = False
+    stats = {"chunk_samples": [], "detector_samples": 0,
+             "input_flagged_samples": 0, "fully_flagged_chunks": 0}
     for i,chunk in enumerate(reader.iter_chunks(cfg)): # chunk_id=chunk.chunk_index
 
         _printLoadingBar(i + 1, cfg.get('total_chunks'), length=40)
+        stats["chunk_samples"].append(int(chunk.signal.shape[0]))
+        stats["detector_samples"] += chunk.flags.size
+        stats["input_flagged_samples"] += int(np.count_nonzero(chunk.flags))
 
         # Skip chunks where all detector data is flagged out
         if np.all(chunk.flags != 0):
+            stats["fully_flagged_chunks"] += 1
             continue 
 
         # Initialize on first valid chunk
@@ -376,7 +449,8 @@ def _prepPass(cfg: dict):
         "obs_info": obs_info, 
         "white_noise_floor": white_noise_floor, 
         "psd_avg": psd_avg, 
-        "psd_freqs": psd_freqs
+        "psd_freqs": psd_freqs,
+        "processing_stats": stats,
     }
     return state
 
@@ -438,15 +512,23 @@ def _mapPass(
     det_half = np.random.default_rng(0).integers(0, 2, size=n_dets_kept)
     psd_raw = psd_cm = None
     tod_rms_data: list = []
+    stats = {
+        "chunk_samples": [], "fully_flagged_chunks": 0,
+        "detector_samples": 0, "input_flagged_samples": 0,
+        "gap_flagged_samples": 0, "cosmic_ray_flagged_samples": 0,
+        "combined_flagged_samples": 0,
+    }
 
     init = False
     for i,chunk in enumerate(reader.iter_chunks(cfgs)):
         chunk_id = chunk.chunk_index
+        stats["chunk_samples"].append(int(chunk.signal.shape[0]))
 
         _printLoadingBar(i + 1, cfgs.get('total_chunks'), length=40)
 
         # Skip chunks where all detector data is flagged out
         if np.all(chunk.flags != 0):
+            stats["fully_flagged_chunks"] += 1
             continue
 
         # Initialize on first valid chunk
@@ -464,6 +546,8 @@ def _mapPass(
         ra = chunk.ra[:, idx] if chunk.ra is not None else None
         dec = chunk.dec[:, idx] if chunk.dec is not None else None
         flags = chunk.flags[:, idx]
+        stats["detector_samples"] += flags.size
+        stats["input_flagged_samples"] += int(np.count_nonzero(flags))
         
         # Subtract signal bias
         sig -= state_1["det_offsets_kept"][np.newaxis, :]
@@ -480,8 +564,11 @@ def _mapPass(
         # Not using the flag_mask here 
         # because I don't know what the flags are.
         sig, clean_flags = tod.cleanTod(
-            sig, chunk.sample_rate, state_1['det_noise'], 
+            sig, chunk.sample_rate, state_1['det_noise'][idx],
             steps=cfgs.get('pipeline'))
+        stats["gap_flagged_samples"] += int(np.count_nonzero(clean_flags & tod.GAP_FLAG))
+        stats["cosmic_ray_flagged_samples"] += int(np.count_nonzero(clean_flags & tod.FLAG_COSMIC_RAY))
+        stats["combined_flagged_samples"] += int(np.count_nonzero((flags != 0) | (clean_flags != 0)))
         clean_flag_mask = np.where(clean_flags!=0, np.nan, flag_mask)
 
         # print(f"1: {time.perf_counter() - t}")
@@ -559,6 +646,7 @@ def _mapPass(
         'naive': naive,
         'total_hits': total_hits,
         'noise_map': noise_map,
+        'processing_stats': stats,
         'null_map': null_map,
         'detsplit_null_map': detsplit_null_map,
         'n_dets': n_dets,
@@ -652,6 +740,14 @@ def _mapPrep(cfg: dict) -> dict:
         s_fp['white_noise_floor'], cfg["pipeline"])
 
     print(f" | Using {len(s_de['keep_idx'])}/{len(s_fp['all_kids'])} detectors")
+    if len(s_de["keep_idx"]) == 0:
+        raise ValueError("All detectors were excluded; check detector selection and thresholds")
+    manual_names = set(cfg["pipeline"].get("exclude_detectors", []))
+    manual_indices = set(cfg["pipeline"].get("exclude_detector_indices", []))
+    manual_excluded = [
+        name for i, name in enumerate(s_fp["all_kids"])
+        if name in manual_names or i in manual_indices
+    ]
 
     # Find detector weights.
     # This uses a static weight per detector:
@@ -695,8 +791,10 @@ def _mapPrep(cfg: dict) -> dict:
         "keep_idx": s_de['keep_idx'],
         "exclude_set": s_de['exclude_set'],
         "auto_excluded": s_de['noise_excluded'],
+        "manual_excluded": manual_excluded,
         "wnf_excluded": s_de['wnf_excluded'],
         "wnf_cutoff": s_de['wnf_cutoff'],
+        "preparation_stats": s_fp["processing_stats"],
         "det_weights": det_weights,
         "ra0_deg": s_ma['ra0_deg'],
         "dec0_deg": s_ma['dec0_deg'],
@@ -745,6 +843,7 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
         "sr": s_sp['sample_rate'],
         "tod_rms_data": s_sp['tod_rms_data'],
         "t_initial": initial_pass_time,
+        "processing_stats": s_sp["processing_stats"],
     }
 
 
@@ -762,6 +861,7 @@ def _makeIterativeMaps(
 
     cm_maps = [("it_0", combined_map.copy())]
     pass_times = [("naive + it_0", state_2["t_initial"])]
+    pass_stats = {"naive + it_0": state_2["processing_stats"]}
 
     if n_iters > 0:
 
@@ -781,6 +881,7 @@ def _makeIterativeMaps(
 
             cm_maps.append((f"it_{i}", combined_map.copy()))
             pass_times.append((f"it_{i}", t_iter))
+            pass_stats[f"it_{i}"] = s_sp["processing_stats"]
 
     else:
         print("Step 3: Skipping (n_iterations = 0).")
@@ -789,6 +890,7 @@ def _makeIterativeMaps(
         'combined_map': combined_map,
         'cm_maps': cm_maps,
         'pass_times': pass_times,
+        'pass_stats': pass_stats,
     }
 
 
@@ -804,12 +906,6 @@ def _buildMetadata(
     pipe_cfg = cfg["pipeline"]
     map_cfg = cfg["map"]
     obs_info = step1_res["obs_info"]
-    all_kids = step1_res["all_kids"]
-    n_total = len(all_kids)
-
-    manual_names = pipe_cfg.get("exclude_detectors", [])
-    manual_indices = pipe_cfg.get("exclude_detector_indices", [])
-
     metadata = {
         "run_timestamp": timestamp,
         "data_format": cfg["data"]["format"],
@@ -835,17 +931,24 @@ def _buildMetadata(
         "pipeline_chunk_memory_gb": pipe_cfg.get("chunk_memory_gb", 0.0),
         "pipeline_resolved_chunk_durations_s": pipe_cfg.get(
             "_resolved_chunk_durations_s", []),
-        "pipeline_clean_steps": pipe_cfg.get("clean_steps", []),
+        "pipeline_clean_steps": [step["name"] for step in _activeCleaningSteps(pipe_cfg)],
         "pipeline_cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
         "pipeline_highpass": pipe_cfg.get("highpass", {}),
         "pipeline_notch": pipe_cfg.get("notch", {}),
-        "map_weighting": ("inverse_variance_white_noise_floor"
-                          if pipe_cfg.get("weight_cap_factor", 5.0) > 0 else "uniform"),
+        "map_weighting": (
+            "inverse_variance_white_noise_floor"
+            if pipe_cfg.get("weight_cap_factor", 5.0) > 0
+            and step1_res["white_noise_floor"] is not None
+            and np.any(np.isfinite(step1_res["white_noise_floor"])
+                       & (step1_res["white_noise_floor"] > 0))
+            else "uniform"),
         "weight_cap_factor": pipe_cfg.get("weight_cap_factor", 5.0),
         "n_detectors_used": len(step1_res["keep_idx"]),
         "n_detectors_excluded": len(step1_res["exclude_set"]),
         "auto_excluded_detectors": step1_res["auto_excluded"],
-        "manual_excluded_detectors": manual_names + [all_kids[i] for i in manual_indices if 0 <= i < n_total],
+        "wnf_excluded_detectors": step1_res["wnf_excluded"],
+        "wnf_exclusion_cutoff": step1_res["wnf_cutoff"],
+        "manual_excluded_detectors": step1_res["manual_excluded"],
         "total_runtime_s": round(elapsed, 2),
         "convergence": {
             "labels": metrics["labels"],
@@ -854,9 +957,34 @@ def _buildMetadata(
             "map_diff_rms": metrics["map_diff_rms"],
             "pass_times_s": [t for _, t in pass_times],
         },
+        "map_pass_times_s": dict(pass_times),
     }
 
     return metadata
+
+
+def _mapQuality(final_map, hits, ra_edges, dec_edges):
+    valid = (hits > 0) & np.isfinite(final_map)
+    quality = {
+        "covered_pixels": int(np.count_nonzero(hits > 0)),
+        "total_pixels": int(hits.size),
+        "coverage_fraction": float(np.mean(hits > 0)),
+        "finite_covered_pixels": int(np.count_nonzero(valid)),
+        "hits_meaning": "sum of detector weights, not raw sample count",
+    }
+    if valid.any():
+        values = final_map[valid]
+        peak_index = np.argmax(np.where(valid, final_map, -np.inf))
+        iy, ix = np.unravel_index(peak_index, final_map.shape)
+        quality.update({
+            "peak": float(final_map[iy, ix]),
+            "peak_ra_deg": float((ra_edges[ix] + ra_edges[ix + 1]) / 2),
+            "peak_dec_deg": float((dec_edges[iy] + dec_edges[iy + 1]) / 2),
+            "covered_median": float(np.median(values)),
+            "covered_p05": float(np.percentile(values, 5)),
+            "covered_p95": float(np.percentile(values, 95)),
+        })
+    return quality
 
 
 # ============================================================================ #
@@ -914,11 +1042,6 @@ def _saveOutputs(
     # Metadata
     elapsed = time.perf_counter() - t_total
     metadata = _buildMetadata(cfg, state_1, state_3['cm_maps'], state_3['pass_times'], metrics, timestamp, elapsed)
-    LOGGER.info("Writing metadata.json")
-    output.save_metadata(metadata, out_dir)
-
-    print(" | Saved metadata")
-
     return out_dir, metadata
 
 
@@ -1027,19 +1150,48 @@ def main():
     t_total = time.perf_counter()
     args = _setupArgParser()
     prof = _setupProfiler(args)
-    cfgs = _loadConfiguration(args.config)
+    cfgs, config_bytes = _loadConfiguration(args.config)
+    software = _softwareProvenance()
 
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
     output_root = pathlib.Path(cfgs["output"]["output_dir"])
     output_root.mkdir(parents=True, exist_ok=True)
-    log_path = output_root / f"run_{timestamp}.log"
-    out_dir = output_root
+    out_dir = output_root / f'{cfgs["output"]["obs_object"]}_{timestamp}'
+    out_dir.mkdir()
+    log_path = out_dir / "run.log"
     log_handler = _setupRunLogger(log_path)
     LOGGER.info("Starting mapmaking run")
     LOGGER.info("Configuration file: %s", pathlib.Path(args.config).resolve())
     LOGGER.info("Run log: %s", log_path)
+    if "error" in software["git"]:
+        LOGGER.warning("Could not determine Git provenance: %s", software["git"]["error"])
+
+    metadata = {
+        "run_timestamp": timestamp,
+        "status": "running",
+        "config_source": str(pathlib.Path(args.config).resolve()),
+        "stage_times_s": {},
+    }
+
+    def save_run_metadata():
+        metadata["input_files_discovered"] = cfgs.get("_input_files_discovered", [])
+        metadata["input_files_opened"] = cfgs.get("_input_files_opened", [])
+        metadata["pipeline_resolved_chunk_durations_s"] = cfgs["pipeline"].get(
+            "_resolved_chunk_durations_s", [])
+        metadata["total_runtime_s"] = round(time.perf_counter() - t_total, 2)
+        output.save_metadata(metadata, out_dir)
 
     try:
+        (out_dir / "config.toml").write_bytes(config_bytes)
+        metadata["resolved_settings"] = _effectiveSettings(cfgs)
+        metadata["active_cleaning_steps"] = _activeCleaningSteps(cfgs["pipeline"])
+        if "clean_steps" in cfgs["pipeline"]:
+            LOGGER.warning(
+                "pipeline.clean_steps does not select main map-pass cleaning; "
+                "configured step blocks determine which steps are invoked"
+            )
+        metadata["software"] = software
+        save_run_metadata()
 
         # Precalculate chunk size
         LOGGER.info("Precalculating total chunks where supported")
@@ -1059,8 +1211,24 @@ def main():
         state_1 = _mapPrep(cfgs)
         step_elapsed = time.perf_counter() - step_start
         n_dets = state_1["obs_info"]["n_detectors"]
-        out_dir = pathlib.Path(cfgs["output"]["output_dir"]) / (
-            f'{cfgs["output"]["obs_object"]}_d{n_dets}_{timestamp}')
+        metadata["stage_times_s"]["preparation"] = step_elapsed
+        metadata.update({
+            "n_detectors": n_dets,
+            "n_detectors_used": len(state_1["keep_idx"]),
+            "n_detectors_excluded": len(state_1["exclude_set"]),
+            "auto_excluded_detectors": state_1["auto_excluded"],
+            "manual_excluded_detectors": state_1["manual_excluded"],
+            "wnf_excluded_detectors": state_1["wnf_excluded"],
+            "wnf_exclusion_cutoff": state_1["wnf_cutoff"],
+            "observation": state_1["obs_info"],
+            "preparation_processing": state_1["preparation_stats"],
+            "detector_weight_summary": {
+                "min": float(np.min(state_1["det_weights_kept"])),
+                "median": float(np.median(state_1["det_weights_kept"])),
+                "max": float(np.max(state_1["det_weights_kept"])),
+            },
+        })
+        save_run_metadata()
         LOGGER.info(
             "Step 1/4: preparation complete in %.1f s; %d/%d detectors kept, "
             "%d excluded (auto-noise flags=%d, white-noise-floor flags=%d); "
@@ -1080,7 +1248,10 @@ def main():
         LOGGER.info("Step 2/4: initial map pass started")
         step_start = time.perf_counter()
         state_2 = _makeMaps(cfgs, state_1)
-        LOGGER.info("Step 2/4: initial maps complete in %.1f s", time.perf_counter() - step_start)
+        metadata["stage_times_s"]["initial_maps"] = time.perf_counter() - step_start
+        metadata["pass_processing"] = {"naive + it_0": state_2["processing_stats"]}
+        save_run_metadata()
+        LOGGER.info("Step 2/4: initial maps complete in %.1f s", metadata["stage_times_s"]["initial_maps"])
 
         # Map making common mode data passes
         print()
@@ -1089,23 +1260,36 @@ def main():
         LOGGER.info("Step 3/4: %d iterative pass(es) starting", n_iterations)
         step_start = time.perf_counter()
         state_3 = _makeIterativeMaps(cfgs, state_1, state_2)
-        LOGGER.info("Step 3/4: iterative maps complete in %.1f s", time.perf_counter() - step_start)
+        metadata["stage_times_s"]["iterations"] = time.perf_counter() - step_start
+        metadata["pass_processing"] = state_3["pass_stats"]
+        save_run_metadata()
+        LOGGER.info("Step 3/4: iterative maps complete in %.1f s", metadata["stage_times_s"]["iterations"])
 
         # Save outputs
         print()
         print("Step 4 (save outputs)")
         LOGGER.info("Step 4/4: saving maps and diagnostics")
         step_start = time.perf_counter()
-        out_dir, metadata = _saveOutputs(
+        out_dir, map_metadata = _saveOutputs(
             cfgs, state_1, state_2, state_3, t_total, timestamp, out_dir)
-        LOGGER.info("Step 4/4: outputs saved in %.1f s", time.perf_counter() - step_start)
+        metadata.update(map_metadata)
+        metadata["map_quality"] = _mapQuality(
+            state_3["combined_map"], state_2["hits"],
+            state_1["ra_edges"], state_1["dec_edges"])
+        metadata["stage_times_s"]["save_outputs"] = time.perf_counter() - step_start
+        metadata["status"] = "completed"
+        save_run_metadata()
+        LOGGER.info("Step 4/4: outputs saved in %.1f s", metadata["stage_times_s"]["save_outputs"])
 
         print()
         finish_run(args, prof, str(out_dir), time.perf_counter() - t_total, log_path)
         LOGGER.info("Run completed in %.1f s; outputs: %s",
                     time.perf_counter() - t_total, out_dir)
-    except Exception:
+    except (Exception, KeyboardInterrupt) as exc:
         LOGGER.exception("Run failed; partial output files, if any, are in %s", out_dir)
+        metadata["status"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+        metadata["error"] = {"type": type(exc).__name__, "message": str(exc)}
+        save_run_metadata()
         raise
     finally:
         LOGGER.removeHandler(log_handler)

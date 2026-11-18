@@ -137,7 +137,7 @@ max_width = 5 # Max spike width to be considered cosmic ray.
 # output
 [output]
 output_dir = "output"
-obs_object = "JupiterSim"
+obs_object = "qlmm" # affects dir name and similar
 save_numpy = true
 save_png   = false
 # PSD diagnostic plots are saved independently of save_png. When save_numpy

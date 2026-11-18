@@ -11,6 +11,7 @@ from unittest import mock
 import h5py
 import numpy as np
 from scipy.signal import welch
+from scipy.spatial.transform import Rotation
 
 
 class RunDiagnosticsTests(unittest.TestCase):
@@ -130,6 +131,104 @@ class RunDiagnosticsTests(unittest.TestCase):
             {"auto_exclude_threshold": 5, "wnf_exclude_sigma": 0})
         self.assertEqual(result["keep_idx"].tolist(), [0, 1])
         self.assertEqual(result["noise_excluded"], ["c"])
+
+    def test_auto_extent_contains_retained_unflagged_samples_in_map_pass(self):
+        cfg = {
+            "map": {"auto_extent": True, "ra0_deg": 10., "dec0_deg": 20.,
+                    "res_arcmin": 15.},
+            "pipeline": {"auto_exclude_threshold": 0, "wnf_exclude_sigma": 0,
+                         "exclude_detector_indices": [1], "weight_cap_factor": 0,
+                         "compute_time_null": False, "compute_detsplit_null": False},
+        }
+
+        def chunks(_cfg):
+            for index in range(2):
+                n = 64
+                ra = np.tile([9. if index == 0 else 12., 100., 11.], (n, 1))
+                dec = np.tile([19. if index == 0 else 21., 80., 20.], (n, 1))
+                flags = np.zeros((n, 3), dtype=int)
+                flags[0, 0] = 1
+                ra[0, 0] = 50.
+                yield self.runner.reader.Chunk(
+                    kids=["a", "excluded", "c"], signal=np.ones((n, 3)),
+                    common_mode=None, ra=ra, dec=dec,
+                    ra_bore=np.full(n, 10.), dec_bore=np.full(n, 20.),
+                    t_start=index * n, t_stop=(index + 1) * n,
+                    sample_rate=10., chunk_index=index, flags=flags)
+
+        with mock.patch.object(self.runner.reader, "iter_chunks", side_effect=chunks):
+            state = self.runner._mapPrep(cfg)
+            result = self.runner._mapPass(cfg, state, common_mode=False,
+                                          compute_nulls=False)
+
+        self.assertLess(state["ra_edges"][0], 9.)
+        self.assertGreater(state["ra_edges"][-1], 12.)
+        self.assertLess(state["dec_edges"][0], 19.)
+        self.assertGreater(state["dec_edges"][-1], 21.)
+        self.assertLess(state["ra_edges"][-1], 50.)
+        np.testing.assert_allclose(np.diff(state["ra_edges"]), .25)
+        np.testing.assert_allclose(np.diff(state["dec_edges"]), .25)
+        self.assertEqual(np.sum(result["total_hits"]), 2 * 64 * 2 - 2)
+
+    def test_auto_extent_supports_boresight_only_and_rejects_missing_pointing(self):
+        cfg = {
+            "map": {"auto_extent": True, "res_arcmin": 60.},
+            "pipeline": {"auto_exclude_threshold": 0, "wnf_exclude_sigma": 0,
+                         "weight_cap_factor": 0, "compute_detsplit_null": False},
+        }
+
+        def chunks(_cfg, invalid=False):
+            n = 8
+            yield self.runner.reader.Chunk(
+                kids=["a"], signal=np.ones((n, 1)), common_mode=None,
+                ra=None, dec=None, ra_bore=np.full(n, 10.),
+                dec_bore=np.full(n, np.nan if invalid else 20.),
+                t_start=0., t_stop=8., sample_rate=1., chunk_index=0,
+                flags=np.zeros((n, 1), dtype=int))
+
+        with mock.patch.object(self.runner.reader, "iter_chunks", side_effect=chunks):
+            state = self.runner._mapPrep(cfg)
+        self.assertLess(state["ra_edges"][0], 10.)
+        self.assertGreater(state["ra_edges"][-1], 10.)
+        self.assertLess(state["dec_edges"][0], 20.)
+        self.assertGreater(state["dec_edges"][-1], 20.)
+
+        with mock.patch.object(self.runner.reader, "iter_chunks",
+                               side_effect=lambda cfg: chunks(cfg, invalid=True)):
+            with self.assertRaisesRegex(ValueError, "unflagged finite pointing"):
+                self.runner._mapPrep(cfg)
+
+    def test_auto_extent_with_hdf5_pointing_and_map_binning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "scan.h5"
+            n = 64
+            focalplane = np.zeros(2, dtype=[("name", "S1"), ("quat", "f8", (4,))])
+            focalplane["name"] = [b"a", b"b"]
+            focalplane["quat"] = Rotation.from_euler("y", [-2., 2.], degrees=True).as_quat()
+            bore = Rotation.from_euler("ZY", [10., 70.], degrees=True).as_quat()
+            with h5py.File(path, "w") as data:
+                data["instrument/focalplane"] = focalplane
+                data["detdata/signal"] = np.tile(np.sin(np.arange(n) / 10.), (2, 1))
+                data["detdata/flags"] = np.zeros((2, n), dtype=int)
+                data["shared/times"] = np.arange(n, dtype=float)
+                data["shared/boresight_radec"] = np.tile(bore, (n, 1))
+            cfg = {
+                "data": {"input_dirs": [temp], "file_format": "h5", "format": "simulation"},
+                "map": {"auto_extent": True, "res_arcmin": 30.},
+                "pipeline": {"chunk_duration_s": 16., "auto_exclude_threshold": 0,
+                             "wnf_exclude_sigma": 0, "weight_cap_factor": 0,
+                             "compute_time_null": False, "compute_detsplit_null": False},
+            }
+            chunks = list(self.runner.reader.iter_chunks(cfg))
+            state = self.runner._mapPrep(cfg)
+            result = self.runner._mapPass(cfg, state, common_mode=False,
+                                          compute_nulls=False)
+            for chunk in chunks:
+                self.assertTrue(np.all(chunk.ra > state["ra_edges"][0]))
+                self.assertTrue(np.all(chunk.ra < state["ra_edges"][-1]))
+                self.assertTrue(np.all(chunk.dec > state["dec_edges"][0]))
+                self.assertTrue(np.all(chunk.dec < state["dec_edges"][-1]))
+            self.assertEqual(np.sum(result["total_hits"]), 2 * n)
 
     def test_hdf5_reader_records_input_manifest(self):
         with tempfile.TemporaryDirectory() as temp:

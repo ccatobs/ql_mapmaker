@@ -17,6 +17,24 @@
 import numpy as np
 
 
+def autoMapEdges(ra0_deg, dec0_deg, pointing_min, pointing_max, res_deg):
+    """Create centered edges containing the pointing with a pixel of margin."""
+    center = np.array([ra0_deg, dec0_deg], dtype=float)
+    if not np.all(np.isfinite(center)) or not np.isfinite(res_deg) or res_deg <= 0:
+        raise ValueError("Automatic map extent requires a finite center and positive pixel size")
+    distance = np.maximum(np.abs(pointing_min - center), np.abs(pointing_max - center))
+    half_pixels = np.ceil(distance / res_deg).astype(int) + 1
+    nx, ny = (int(2 * n) for n in half_pixels)
+    return {
+        "ra_edges": np.linspace(ra0_deg - half_pixels[0] * res_deg,
+                                ra0_deg + half_pixels[0] * res_deg, nx + 1),
+        "dec_edges": np.linspace(dec0_deg - half_pixels[1] * res_deg,
+                                 dec0_deg + half_pixels[1] * res_deg, ny + 1),
+        "nx": nx,
+        "ny": ny,
+    }
+
+
 # ============================================================================ #
 # makeMapEdges
 def makeMapEdges(

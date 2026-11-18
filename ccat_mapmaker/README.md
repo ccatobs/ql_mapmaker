@@ -70,6 +70,21 @@ ylen_deg   = 1.0   # map height in degrees
 res_arcmin = 0.25  # pixel size in arcminutes
 ```
 
+To size the map automatically, set `auto_extent = true` in `[map]`.
+The preparation pass measures finite, input-unflagged detector and boresight
+pointing for retained detectors over the selected time window. The map stays
+centred at the configured, target, or automatic centre, and extends at least
+one pixel beyond the measured bounds. `xlen_deg` and `ylen_deg` are ignored
+and may be omitted in this mode. Later cleaning can exclude additional
+samples. Time-window limits are applied at chunk boundaries. An extent cannot
+be determined if no retained detector has usable pointing. Per-detector
+diagnostic maps use this same grid; samples from excluded detectors selected
+for those diagnostics are not included in the extent calculation.
+
+RA is currently binned in its raw 0–360 degree coordinates without wraparound.
+Scans crossing 0 degrees, or a centre far from the data, can therefore produce
+very large maps; check the reported grid size and available memory.
+
 ### 3. Run
 
 From the `CCAT/` directory (one level above `ccat_mapmaker/`):
@@ -147,6 +162,7 @@ All settings live in `config.toml`. The most commonly changed ones:
 | `file_format` | `[data]` | `"g3"` or `"h5"` |
 | `format` | `[data]` | `"simulation"` or `"lab"` |
 | `ra0_deg`, `dec0_deg`, `target` | `[map]` | Map centre (omit all three to auto-detect) |
+| `auto_extent` | `[map]` | Size map from pointing (`false` by default); otherwise use `xlen_deg` and `ylen_deg` |
 | `res_arcmin` | `[map]` | Pixel size in arcminutes |
 | `n_iterations` | `[pipeline]` | Common-mode subtraction iterations (3-5 is typical) |
 | `start_offset_s` | `[pipeline]` | Skip this many seconds at the start |

@@ -166,6 +166,7 @@ def _softwareProvenance():
 def _effectiveSettings(cfg):
     """Record defaults used by the main map passes, without changing behavior."""
     settings = copy.deepcopy(cfg)
+    settings["map"].setdefault("auto_extent", False)
     pipe = settings["pipeline"]
     for key, value in {
         "start_offset_s": 0.0, "max_duration_s": None,
@@ -418,6 +419,9 @@ def _prepPass(cfg: dict):
     """
 
     # Stream through chunks of time-ordered data (TOD)
+    auto_extent = cfg.get("map", {}).get("auto_extent", False)
+    if not isinstance(auto_extent, bool):
+        raise ValueError("map.auto_extent must be true or false")
     init = False
     stats = {"chunk_samples": [], "detector_samples": 0,
              "input_flagged_samples": 0, "fully_flagged_chunks": 0,
@@ -451,6 +455,9 @@ def _prepPass(cfg: dict):
             det_diff_sum = np.zeros(n_dets)
             det_diff_sum_sq = np.zeros(n_dets)
             det_diff_count = np.zeros(n_dets, dtype=int)
+            if auto_extent:
+                pointing_min = np.full((2, n_dets), np.inf)
+                pointing_max = np.full((2, n_dets), -np.inf)
 
             # Percalcuations for the FFT periodgram
             window = np.hanning(nominal_chunk_len)[:, None]
@@ -480,6 +487,20 @@ def _prepPass(cfg: dict):
         det_diff_count  += np.sum(valid_mask, axis=0)
         n_chunks        += 1
 
+        if auto_extent:
+            # Include boresight as well as detector pointing for boresight maps.
+            pointings = [(chunk.ra_bore[:, None], chunk.dec_bore[:, None])]
+            if chunk.ra is not None:
+                pointings.append((chunk.ra, chunk.dec))
+            for ra, dec in pointings:
+                valid = (chunk.flags == 0) & np.isfinite(ra) & np.isfinite(dec)
+                for axis, values in enumerate((ra, dec)):
+                    values = np.broadcast_to(values, valid.shape)
+                    pointing_min[axis] = np.minimum(
+                        pointing_min[axis], np.min(values, axis=0, where=valid, initial=np.inf))
+                    pointing_max[axis] = np.maximum(
+                        pointing_max[axis], np.max(values, axis=0, where=valid, initial=-np.inf))
+
         # We are using a strided median to reduce computation.
         # Dynamically determines stride size for statistical robustness.
         # det_median = np.nanmedian(chunk.signal[::4, :], axis=0)
@@ -504,6 +525,9 @@ def _prepPass(cfg: dict):
         t_obs_stop = chunk.t_stop
 
     _printLoadingBar(clear=True)
+
+    if not init:
+        raise ValueError("No unflagged data chunks are available for map preparation")
 
     # Observation telemetry
     obs_info = reader.packObsInfo(
@@ -551,6 +575,9 @@ def _prepPass(cfg: dict):
         "psd_freqs": psd_freqs,
         "processing_stats": stats,
     }
+    if auto_extent:
+        state["pointing_min"] = pointing_min
+        state["pointing_max"] = pointing_max
     return state
 
 
@@ -888,11 +915,25 @@ def _mapPrep(cfg: dict) -> dict:
         cfg, s_fp['obs_info'], s_fp['ra0_auto'], s_fp['dec0_auto'])
 
     # Construct coord pixel grid boundaries (edges)
-    s_ma |= map.makeMapEdges( # add to map state dict
-        ra0_deg=s_ma['ra0_deg'], dec0_deg=s_ma['dec0_deg'],
-        xlen_deg=cfg["map"]["xlen_deg"], ylen_deg=cfg["map"]["ylen_deg"],
-        res_deg=cfg["map"]["res_arcmin"]/60.0,
-    )
+    map_cfg = cfg["map"]
+    if map_cfg.get("auto_extent", False):
+        point_min = np.min(s_fp["pointing_min"][:, s_de["keep_idx"]], axis=1)
+        point_max = np.max(s_fp["pointing_max"][:, s_de["keep_idx"]], axis=1)
+        if not (np.all(np.isfinite(point_min)) and np.all(np.isfinite(point_max))):
+            raise ValueError("Automatic map extent requires unflagged finite pointing for retained detectors")
+        if point_max[0] - point_min[0] > 180:
+            LOGGER.warning(
+                "Automatic map extent spans more than 180 degrees in RA; "
+                "RA wraparound is not supported and the map may be very large")
+        edges = map.autoMapEdges(
+            s_ma["ra0_deg"], s_ma["dec0_deg"], point_min, point_max,
+            map_cfg["res_arcmin"] / 60.0)
+    else:
+        edges = map.makeMapEdges(
+            ra0_deg=s_ma['ra0_deg'], dec0_deg=s_ma['dec0_deg'],
+            xlen_deg=map_cfg["xlen_deg"], ylen_deg=map_cfg["ylen_deg"],
+            res_deg=map_cfg["res_arcmin"]/60.0)
+    s_ma |= edges
 
     print(f" | Map grid: {s_ma['ny']} x {s_ma['nx']} pixels", end="")
     print(f" ({cfg['map']['res_arcmin']:.1f} arcmin/pixel)", end="")

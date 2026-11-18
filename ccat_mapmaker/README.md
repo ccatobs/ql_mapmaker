@@ -114,7 +114,6 @@ Output : ccat_mapmaker/output
 
 Step 1: First pass (baselines + map centre)...
   Baselines: -0.0123 - 0.0456  [2.3s]
-  PSD anomalies flagged: 1 (0.31 Hz (6.2 dB))
   Auto-exclusion: noise median=0.0021  cutoff=0.0105 (5.0x)  excluded=3/280
   WNF-exclusion: cutoff=0.0043 (log-median+3.0sigma)  excluded=5/277
   Using 272/280 detectors
@@ -135,7 +134,8 @@ Log saved  : ccat_mapmaker/output/RCW92_2024-07-08_14-32-01-123456/run.log
 ============================================================
 ```
 
-The `PSD anomalies flagged` and `WNF-exclusion` lines only appear if `psd_anomaly_sigma` / `wnf_exclude_sigma` are enabled and find something (see below).
+The `WNF-exclusion` line only appears if `wnf_exclude_sigma` is enabled and
+finds an outlier.
 
 ## Configuring a run
 
@@ -158,7 +158,7 @@ All settings live in `config.toml`. The most commonly changed ones:
 | `auto_exclude_threshold` | `[pipeline]` | Exclude detectors with noise > N x median noise (`0` to disable) |
 | `wnf_exclude_sigma` | `[pipeline]` | Exclude detectors by white-noise-floor outlier, on top of `auto_exclude_threshold` (`0` to disable) |
 | `weight_cap_factor` | `[pipeline]` | Cap each detector's inverse-variance map weight at N x the median weight (`0` for uniform weighting) |
-| `psd_anomaly_sigma` | `[pipeline]` | Flag narrowband PSD contaminants for follow-up, doesn't remove anything (`0` to disable) |
+| `save_psd` | `[output]` | Save PSD diagnostics (`true` by default), independently of `save_png` |
 | `output_dir` | `[output]` | Where to write outputs |
 
 ## Cleaning steps
@@ -194,7 +194,7 @@ Add or remove the corresponding blocks to enable or disable steps.
 `cosmic_rays` removes sudden spikes by interpolation, `highpass` removes slow
 atmospheric drift, and `notch` removes mains-line pickup and its harmonics.
 
-Separately, `psd_anomaly_sigma` looks for narrowband features in the timestream PSD that don't fit either category (not at a mains frequency, not atmospheric drift). These aren't removed, just flagged in `metadata.json` for follow-up, since an unexplained line could be a real instrumental effect worth investigating rather than something safe to filter out.
+PSD anomaly detection is not currently connected to the main pipeline.
 
 ## Optional features
 
@@ -270,7 +270,10 @@ Each run does the following:
 | `detector_split_weight_0.npy`, `detector_split_weight_1.npy` | Final-pass detector-split per-pixel weight sums, if enabled |
 | `ra_edges.npy`, `dec_edges.npy` | Pixel grid edges (for loading maps in numpy) |
 | `diagnostics.png` | Peak signal, off-source RMS, convergence, and runtime per pass |
-| `psd.png` | Timestream PSD before vs. after common-mode subtraction |
+| `psd.png` | Final-pass matched-detector PSD before vs. after common-mode subtraction |
+| `psd.npz` | Frequencies, detector names, segment counts and per-detector before/after PSDs |
+| `weighting_psd.png` | Preparation PSD distribution and white-noise band |
+| `weighting_psd.npz` | Preparation PSD frequency summary and per-detector white-noise floors |
 | `config.toml` | Exact copy of the input configuration |
 | `metadata.json` | Run status, provenance, settings, input manifest, processing and map diagnostics |
 | `run.log` | Run log with timings and errors, including failed runs |
@@ -306,6 +309,34 @@ they are **not independently processed reconstructions**. Common artifacts can
 cancel, while different coverage and filtering can leave sky residuals. A
 passing null does not prove a map is unbiased, and the half-difference is not
 automatically a calibrated noise estimate.
+
+### PSD diagnostics
+
+`save_psd = true` (the default) saves the PSD plots independently of
+`save_png`; the `.npz` files additionally require `save_numpy = true`. The
+comparison samples up to 16 evenly spaced retained detectors in the **final**
+map pass. Both spectra use the same matched segments after baseline removal and
+configured cleaning, immediately before and after common-mode subtraction.
+Each detector's spectrum is the mean of its usable Welch segments; the plot
+shows the median and 25th–75th percentile across those detectors. The segment
+length is the smaller of 2048 and the first usable chunk length, with a Hann
+window, 50% overlap within chunks and constant detrending. Segments containing
+input or cleaning flags or non-finite samples are omitted from both spectra.
+Frequency resolution, detector identities and segment counts are recorded in
+`metadata.json`. Short chunks may contribute no segments; low frequencies
+below the resolution cannot be assessed. Signal units are inherited from the
+input, not independently calibrated. Chunks with invalid or different sample
+rates are excluded from the comparison and reported in the log and metadata.
+
+`weighting_psd.png` shows the separate preparation-pass periodogram used by
+the current noise-floor and weighting calculation. **Its estimator is
+unchanged:** only chunks exactly as long as the first usable chunk contribute,
+and input flags are not masked. `preparation_processing` records eligible and
+used time samples, chunk length and non-finite detector count; the log warns
+about omitted chunks or flags. In auto chunk mode this can represent only part
+of the observation. The two plots use different estimators, detector sets and
+time selections and should not be directly compared as a filtering transfer
+function.
 
 ### Loading a map in Python
 

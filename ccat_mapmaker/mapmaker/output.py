@@ -336,49 +336,60 @@ def plot_tod_rms(tod_rms_data: list, filepath: pathlib.Path):
 # ============================================================================ #
 # plot_psd
 # ============================================================================ #
-def plot_psd(raw_tod: np.ndarray, cleaned_tod: np.ndarray,
-             sample_rate: float, filepath: pathlib.Path,
-             n_det_sample: int = 10):
-    """
-    PSD diagnostic comparing raw timestreams vs common-mode-cleaned timestreams.
+def _psd_band(ax, freqs, lo, med, hi, color, label):
+    """Plot detector median and interquartile range on a logarithmic axis."""
+    positive = (freqs > 0) & (med > 0)
+    ax.loglog(freqs[positive], med[positive], color=color, linewidth=1.5, label=label)
+    band = positive & (lo > 0) & (hi > 0)
+    ax.fill_between(freqs[band], lo[band], hi[band], color=color, alpha=0.2)
+    return bool(positive.any())
 
-    Computes Welch PSD for up to n_det_sample evenly-spaced detectors and plots
-    median + 25–75th percentile band on a log-log scale.
-    """
-    from scipy.signal import welch
 
-    n_dets  = raw_tod.shape[1]
-    det_idx = np.linspace(0, n_dets - 1, min(n_det_sample, n_dets), dtype=int)
-    nperseg = min(256, raw_tod.shape[0])
-
+def plot_psd(freqs: np.ndarray, before: np.ndarray, after: np.ndarray,
+             filepath: pathlib.Path, stage: str):
+    """Plot matched final-pass PSDs before and after common-mode subtraction."""
     fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
-
-    for tod, label, color in [
-        (raw_tod,     "Raw (before CM)",    "#e74c3c"),
-        (cleaned_tod, "Cleaned (after CM)", "#2980b9"),
-    ]:
-        psds = []
-        for i in det_idx:
-            f, p = welch(tod[:, i], fs=sample_rate, nperseg=nperseg)
-            psds.append(p)
-        psds = np.array(psds)
-        med  = np.median(psds, axis=0)
-        lo   = np.percentile(psds, 25, axis=0)
-        hi   = np.percentile(psds, 75, axis=0)
-        ax.loglog(f[1:], med[1:], color=color, linewidth=1.5, label=label)
-        ax.fill_between(f[1:], lo[1:], hi[1:], color=color, alpha=0.2)
-
-    ax.set_xlabel("Frequency (Hz)", fontsize=FONT_LABEL)
-    ax.set_ylabel("Power Spectral Density", fontsize=FONT_LABEL)
-    ax.set_title("Timestream PSD: Before vs After Common-Mode Subtraction",
-                 fontsize=FONT_TITLE, fontweight="bold")
-    ax.tick_params(labelsize=FONT_TICK)
-    ax.legend(fontsize=FONT_TICK)
+    has_before = _psd_band(ax, freqs, *np.percentile(before, [25, 50, 75], axis=1),
+                           "#e74c3c", "Before common mode")
+    has_after = _psd_band(ax, freqs, *np.percentile(after, [25, 50, 75], axis=1),
+                          "#2980b9", "After common mode")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    if not (has_before or has_after):
+        ax.set_xlim(freqs[1] * 0.8, freqs[-1] * 1.2)
+        ax.set_ylim(1e-30, 1)
+    if not (has_before and has_after):
+        ax.text(0.02, 0.03, "Zero power is omitted on logarithmic axes",
+                transform=ax.transAxes, fontsize=9)
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("PSD (signal² / Hz)")
+    ax.set_title(f"Matched detector PSDs: {stage}")
+    ax.legend()
     ax.grid(True, which="both", alpha=0.2)
-    fig.suptitle("CCAT Prime-Cam Quick-Look Diagnostic",
-                 fontsize=12, fontweight="bold", color="#444444", y=1.02)
+    fig.savefig(filepath, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
 
-    plt.savefig(filepath, dpi=DPI, bbox_inches="tight")
+
+def plot_weighting_psd(freqs: np.ndarray, summary: np.ndarray, sample_rate: float,
+                       filepath: pathlib.Path):
+    """Plot the actual preparation-pass spectra used for detector weighting."""
+    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    has_power = _psd_band(ax, freqs, *summary, "#2980b9", "Preparation PSD")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    if not has_power:
+        ax.set_xlim(freqs[1] * 0.8, freqs[-1] * 1.2)
+        ax.set_ylim(1e-30, 1)
+        ax.text(0.02, 0.03, "Zero power is omitted on logarithmic axes",
+                transform=ax.transAxes, fontsize=9)
+    ax.axvspan(0.4 * sample_rate / 2, 0.9 * sample_rate / 2,
+               color="#e67e22", alpha=0.2, label="White-noise band")
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("PSD (signal² / Hz)")
+    ax.set_title("Preparation PSD for weighting and exclusion")
+    ax.legend()
+    ax.grid(True, which="both", alpha=0.2)
+    fig.savefig(filepath, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
 
 

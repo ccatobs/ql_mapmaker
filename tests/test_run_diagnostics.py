@@ -10,6 +10,7 @@ from unittest import mock
 
 import h5py
 import numpy as np
+from scipy.signal import welch
 
 
 class RunDiagnosticsTests(unittest.TestCase):
@@ -238,6 +239,108 @@ class RunDiagnosticsTests(unittest.TestCase):
         state = {"nx": 1, "ny": 1, "det_offsets_kept": np.zeros(1)}
         with self.assertRaisesRegex(ValueError, "at least two retained detectors"):
             self.runner._mapPass(cfg, state)
+
+    def test_psd_comparison_uses_matched_clean_segments(self):
+        sample_rate = 128.
+        t = np.arange(4096) / sample_rate
+        common = np.sin(2 * np.pi * 8 * t)
+        differential = 0.3 * np.sin(2 * np.pi * 20 * t)
+        before = np.column_stack((common + differential, common - differential))
+        after = before - np.mean(before, axis=1, keepdims=True)
+        flags = np.ones_like(before)
+        flags[0, 0] = np.nan
+        acc = self.runner._PsdComparison(["a", "b"])
+        acc.add(before, after, flags, sample_rate)
+        info, result = acc.result()
+        self.assertEqual(info["segment_counts"], [2, 3])
+        self.assertEqual(info["nperseg"], 2048)
+        self.assertEqual(info["candidate_segments"], 3)
+        freq, expected = welch(before[1024:3072, 0], fs=sample_rate, nperseg=2048)
+        np.testing.assert_allclose(result["frequency_hz"], freq)
+        np.testing.assert_allclose(result["before"][:, 0], expected, atol=1e-12)
+        at_8 = np.argmin(abs(freq - 8))
+        at_20 = np.argmin(abs(freq - 20))
+        self.assertGreater(result["before"][at_8, 0], 1.)
+        self.assertLess(result["after"][at_8, 0], 1e-20)
+        self.assertAlmostEqual(result["before"][at_20, 0], result["after"][at_20, 0])
+
+    def test_psd_comparison_reports_no_clean_segments(self):
+        acc = self.runner._PsdComparison(["a"])
+        acc.add(np.ones((8, 1)), np.ones((8, 1)), np.full((8, 1), np.nan), 10.)
+        info, result = acc.result()
+        self.assertIsNone(result)
+        self.assertEqual(info["segment_counts"], [0])
+        self.assertIn("unavailable", info["status"])
+        acc.add(np.ones((8, 1)), np.ones((8, 1)), np.ones((8, 1)), 11.)
+        info, result = acc.result()
+        self.assertIsNone(result)
+        self.assertEqual(info["skipped_sample_rate_chunks"], 1)
+
+    def test_psd_diagnostics_saved_without_map_pngs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config, _ = self.make_config(root)
+
+            def clean_chunks(files, *args, **kwargs):
+                for chunk in self.fake_chunks(files, *args, **kwargs):
+                    yield replace(chunk, signal=np.nan_to_num(chunk.signal),
+                                  flags=np.zeros_like(chunk.flags))
+
+            with mock.patch.object(sys, "argv", ["run_mapmaker", "--config", str(config)]), \
+                 mock.patch.object(self.runner.reader, "_iter_h5_simulation_chunks", clean_chunks):
+                self.runner.main()
+            run, = (root / "results").iterdir()
+            metadata = json.loads((run / "metadata.json").read_text())
+            info = metadata["psd_diagnostics"]
+            self.assertEqual(info["status"], "available")
+            self.assertEqual(info["weighting_psd_status"], "available")
+            self.assertEqual(info["stage"], "it_1")
+            self.assertEqual(info["segment_counts"], [1, 1])
+            self.assertTrue((run / "psd.png").is_file())
+            self.assertTrue((run / "weighting_psd.png").is_file())
+            with np.load(run / "psd.npz") as data:
+                self.assertEqual(data["before"].shape, (65, 2))
+                self.assertEqual(data["after"].shape, (65, 2))
+                self.assertEqual(data["detectors"].tolist(), ["a", "c"])
+            with np.load(run / "weighting_psd.npz") as data:
+                self.assertEqual(data["white_noise_floor"].shape, (3,))
+            self.assertFalse((run / "it_1.png").exists())
+
+            config.write_text(config.read_text() + "save_psd = false\n")
+            with mock.patch.object(sys, "argv", ["run_mapmaker", "--config", str(config)]), \
+                 mock.patch.object(self.runner.reader, "_iter_h5_simulation_chunks", clean_chunks):
+                self.runner.main()
+            without_psd, = set((root / "results").iterdir()) - {run}
+            other_metadata = json.loads((without_psd / "metadata.json").read_text())
+            self.assertEqual(other_metadata["psd_diagnostics"]["status"], "disabled")
+            self.assertFalse((without_psd / "psd.png").exists())
+            for name in ("naive.npy", "it_0.npy", "it_1.npy"):
+                np.testing.assert_array_equal(np.load(run / name), np.load(without_psd / name))
+
+    def test_prep_psd_reports_ignored_chunks_without_changing_estimator(self):
+        state = self.runner
+        cfg = {"data": {}, "pipeline": {}}
+        t = np.arange(16, dtype=float)
+        chunks = [
+            state.reader.Chunk(
+                kids=["a"], signal=(np.sin(t[:n]) * amplitude)[:, None],
+                common_mode=None, ra=np.full((n, 1), .5), dec=np.full((n, 1), .5),
+                ra_bore=np.full(n, .5), dec_bore=np.full(n, .5),
+                t_start=float(i * 16), t_stop=float(i * 16 + n - 1),
+                sample_rate=16., chunk_index=i, flags=np.zeros((n, 1), dtype=int),
+            )
+            for i, (n, amplitude) in enumerate(((16, 1.), (12, 10.)))
+        ]
+        expected = state._fastPeriodogram(
+            chunks[0].signal, np.hanning(16)[:, None], 16 * np.sum(np.hanning(16)**2),
+            np.nanmedian(chunks[0].signal, axis=0), 16)
+        with mock.patch.object(state.reader, "iter_chunks", return_value=iter(chunks)), \
+             self.assertLogs("ccat_mapmaker", level="WARNING") as logs:
+            result = state._prepPass(cfg)
+        np.testing.assert_allclose(result["psd_avg"], expected)
+        self.assertEqual(result["processing_stats"]["psd_time_samples_used"], 16)
+        self.assertEqual(result["processing_stats"]["psd_eligible_time_samples"], 28)
+        self.assertIn("16 of 28", logs.output[0])
 
     def test_saved_nulls_come_from_last_pass(self):
         for iterations in (0, 1):

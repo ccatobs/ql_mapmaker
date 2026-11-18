@@ -176,7 +176,7 @@ def _effectiveSettings(cfg):
         "exclude_detectors": [], "exclude_detector_indices": [],
     }.items():
         pipe.setdefault(key, value)
-    for key, value in {"save_numpy": True, "save_png": True}.items():
+    for key, value in {"save_numpy": True, "save_png": True, "save_psd": True}.items():
         settings["output"].setdefault(key, value)
     return settings
 
@@ -252,6 +252,85 @@ def _fastPeriodogram(signal, window, window_scale, med, length):
         p[1:, :] *= 2
 
     return p
+
+
+class _PsdComparison:
+    """Accumulate matched, clean Welch segments for a small detector sample."""
+
+    def __init__(self, names):
+        self.indices = np.linspace(0, len(names) - 1, min(16, len(names)), dtype=int)
+        self.names = [str(names[i]) for i in self.indices]
+        self.nperseg = None
+        self.freqs = None
+        self.before_sum = None
+        self.after_sum = None
+        self.counts = np.zeros(len(self.indices), dtype=int)
+        self.candidate_segments = 0
+        self.sample_rate = None
+        self.nonfinite_spectra = 0
+        self.skipped_sample_rate_chunks = 0
+
+    def add(self, before, after, flag_mask, sample_rate):
+        if not np.isfinite(sample_rate) or sample_rate <= 0:
+            self.skipped_sample_rate_chunks += 1
+            return
+        if self.nperseg is None:
+            if before.shape[0] < 4:
+                return
+            self.nperseg = min(2048, before.shape[0])
+            self.sample_rate = sample_rate
+            self.freqs = np.fft.rfftfreq(self.nperseg, 1 / sample_rate)
+            shape = (len(self.freqs), len(self.indices))
+            self.before_sum = np.zeros(shape)
+            self.after_sum = np.zeros(shape)
+        elif not np.isclose(sample_rate, self.sample_rate, rtol=1e-8, atol=0):
+            self.skipped_sample_rate_chunks += 1
+            return
+
+        step = max(1, self.nperseg // 2)
+        for start in range(0, before.shape[0] - self.nperseg + 1, step):
+            self.candidate_segments += 1
+            stop = start + self.nperseg
+            raw = before[start:stop]
+            cleaned = after[start:stop, self.indices]
+            flags = flag_mask[start:stop, self.indices]
+            valid = np.all(np.isfinite(raw) & np.isfinite(cleaned) & np.isfinite(flags), axis=0)
+            if not np.any(valid):
+                continue
+            _, p_before = welch(raw[:, valid], fs=sample_rate, window="hann",
+                                nperseg=self.nperseg, noverlap=0, axis=0)
+            _, p_after = welch(cleaned[:, valid], fs=sample_rate, window="hann",
+                               nperseg=self.nperseg, noverlap=0, axis=0)
+            finite = np.all(np.isfinite(p_before) & np.isfinite(p_after), axis=0)
+            self.nonfinite_spectra += int(np.count_nonzero(~finite))
+            indices = np.flatnonzero(valid)[finite]
+            self.before_sum[:, indices] += p_before[:, finite]
+            self.after_sum[:, indices] += p_after[:, finite]
+            self.counts[indices] += 1
+
+    def result(self):
+        info = {
+            "detectors": self.names, "segment_counts": self.counts.tolist(),
+            "candidate_segments": self.candidate_segments,
+            "nonfinite_spectral_segments": self.nonfinite_spectra,
+            "skipped_sample_rate_chunks": self.skipped_sample_rate_chunks,
+            "nperseg": self.nperseg, "window": "Hann (periodic)",
+            "overlap_samples": self.nperseg // 2 if self.nperseg else None,
+            "detrend": "constant",
+        }
+        if self.freqs is None or not np.any(self.counts):
+            info["status"] = "unavailable: no valid matched segments"
+            return info, None
+        valid = self.counts > 0
+        info["status"] = "available"
+        info["frequency_resolution_hz"] = float(self.freqs[1] - self.freqs[0])
+        return info, {
+            "frequency_hz": self.freqs,
+            "before": self.before_sum[:, valid] / self.counts[valid],
+            "after": self.after_sum[:, valid] / self.counts[valid],
+            "detectors": np.asarray(self.names)[valid],
+            "segment_counts": self.counts[valid],
+        }
 
 
 # ============================================================================ #
@@ -341,7 +420,8 @@ def _prepPass(cfg: dict):
     # Stream through chunks of time-ordered data (TOD)
     init = False
     stats = {"chunk_samples": [], "detector_samples": 0,
-             "input_flagged_samples": 0, "fully_flagged_chunks": 0}
+             "input_flagged_samples": 0, "fully_flagged_chunks": 0,
+             "psd_eligible_time_samples": 0}
     for i,chunk in enumerate(reader.iter_chunks(cfg)): # chunk_id=chunk.chunk_index
 
         _printLoadingBar(i + 1, cfg.get('total_chunks'), length=40)
@@ -353,6 +433,7 @@ def _prepPass(cfg: dict):
         if np.all(chunk.flags != 0):
             stats["fully_flagged_chunks"] += 1
             continue 
+        stats["psd_eligible_time_samples"] += int(chunk.signal.shape[0])
 
         # Initialize on first valid chunk
         # ------------------------------------------------------ #
@@ -435,6 +516,24 @@ def _prepPass(cfg: dict):
 
     # Average Sxx across chunks
     psd_avg = psd_sum/psd_count if psd_count>0 else None
+    stats.update({
+        "psd_chunk_samples": nominal_chunk_len,
+        "psd_chunks_used": psd_count,
+        "psd_time_samples_used": psd_count * nominal_chunk_len,
+        "psd_frequency_resolution_hz": float(sample_rate / nominal_chunk_len),
+        "psd_input_flags_applied": False,
+        "psd_nonfinite_detectors": (
+            int(np.count_nonzero(~np.all(np.isfinite(psd_avg), axis=0)))
+            if psd_avg is not None else None),
+    })
+    if stats["psd_time_samples_used"] < stats["psd_eligible_time_samples"]:
+        LOGGER.warning(
+            "Weighting PSD used %d of %d eligible time samples; only chunks of %d samples contribute",
+            stats["psd_time_samples_used"], stats["psd_eligible_time_samples"], nominal_chunk_len)
+    if stats["input_flagged_samples"]:
+        LOGGER.warning("Weighting PSD does not mask input flags; flagged samples may affect detector weights")
+    if stats["psd_nonfinite_detectors"]:
+        LOGGER.warning("Weighting PSD is non-finite for %d detectors", stats["psd_nonfinite_detectors"])
 
     # Extract the white noise floor
     white_noise_floor = tod.findWhiteNoiseFloor(
@@ -480,6 +579,7 @@ def _mapPass(
     weights: np.ndarray = None,
     also_naive: bool = False,
     compute_nulls: bool = True,
+    collect_psd: bool = False,
     ):
 
     pipe_cfg = cfgs['pipeline']
@@ -517,7 +617,7 @@ def _mapPass(
         order = np.random.default_rng(0).permutation(n_dets_kept)
         det_half = np.ones(n_dets_kept, dtype=int)
         det_half[order[:n_dets_kept // 2]] = 0
-    psd_raw = psd_cm = None
+    psd = _PsdComparison(state_1["kids_kept"]) if collect_psd else None
     tod_rms_data: list = []
     stats = {
         "chunk_samples": [], "fully_flagged_chunks": 0,
@@ -577,6 +677,7 @@ def _mapPass(
         stats["cosmic_ray_flagged_samples"] += int(np.count_nonzero(clean_flags & tod.FLAG_COSMIC_RAY))
         stats["combined_flagged_samples"] += int(np.count_nonzero((flags != 0) | (clean_flags != 0)))
         clean_flag_mask = np.where(clean_flags!=0, np.nan, flag_mask)
+        psd_before = sig[:, psd.indices].copy() if psd is not None else None
 
         # print(f"1: {time.perf_counter() - t}")
         # t = time.perf_counter()
@@ -589,6 +690,8 @@ def _mapPass(
                 sig, flag_mask, 
                 ra, dec, state_1["ra_edges"], state_1["dec_edges"],
                 current_map)
+        if psd is not None:
+            psd.add(psd_before, sig, clean_flag_mask, chunk.sample_rate)
 
         # Make map for this chunk (0.2 s)
         if also_naive:
@@ -663,6 +766,7 @@ def _mapPass(
         'time_split_weights': null_hits,
         'detector_split_weights': detsplit_hits,
         'detector_split_assignment': det_half,
+        'psd_comparison': psd.result() if psd is not None else None,
         'n_dets': n_dets,
         'sample_rate': sample_rate,
         'tod_rms_data': tod_rms_data
@@ -843,7 +947,8 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
     t = time.perf_counter()
     s_sp = _mapPass(
         cfg, state_1, weights=state_1["det_weights_kept"], also_naive=True,
-        compute_nulls=pipe_cfg["n_iterations"] == 0)
+        compute_nulls=pipe_cfg["n_iterations"] == 0,
+        collect_psd=cfg["output"].get("save_psd", True) and pipe_cfg["n_iterations"] == 0)
     initial_pass_time = time.perf_counter() - t
 
     print(f" | Naive + initial common-mode maps (chunk_duration_s={chunk_s})")
@@ -860,6 +965,7 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
         "time_split_weights": s_sp["time_split_weights"],
         "detector_split_weights": s_sp["detector_split_weights"],
         "detector_split_assignment": s_sp["detector_split_assignment"],
+        "psd_comparison": s_sp["psd_comparison"],
         "sr": s_sp['sample_rate'],
         "tod_rms_data": s_sp['tod_rms_data'],
         "t_initial": initial_pass_time,
@@ -893,7 +999,8 @@ def _makeIterativeMaps(
             s_sp = _mapPass(
                 cfg, state_1, weights=state_1["det_weights_kept"],
                 current_map=combined_map,
-                also_naive=True, compute_nulls=i == n_iters)
+                also_naive=True, compute_nulls=i == n_iters,
+                collect_psd=cfg["output"].get("save_psd", True) and i == n_iters)
             combined_map = s_sp['combined']
             if i == n_iters:
                 null_result = s_sp
@@ -919,6 +1026,7 @@ def _makeIterativeMaps(
         'time_split_weights': null_result['time_split_weights'],
         'detector_split_weights': null_result['detector_split_weights'],
         'detector_split_assignment': null_result['detector_split_assignment'],
+        'psd_comparison': null_result['psd_comparison'],
     }
 
 
@@ -1044,6 +1152,57 @@ def _nullMetadata(state_1, state_3):
     return products
 
 
+def _savePsdDiagnostics(state_1, state_3, out_dir, out_cfg):
+    if not out_cfg.get("save_psd", True):
+        return {"status": "disabled"}
+
+    LOGGER.info("Saving PSD diagnostics for the final map pass and preparation")
+    info, comparison = state_3["psd_comparison"]
+    info["stage"] = state_3["cm_maps"][-1][0]
+    info["before"] = "after baseline removal and configured cleaning, before common mode"
+    info["after"] = "after common-mode subtraction"
+    info["segment_selection"] = "matched segments with no input or cleaning flags and finite signals"
+    if info["nonfinite_spectral_segments"]:
+        LOGGER.warning("Excluded %d matched PSD segments with non-finite spectra",
+                       info["nonfinite_spectral_segments"])
+    if info["skipped_sample_rate_chunks"]:
+        LOGGER.warning("Skipped %d PSD comparison chunks with invalid or differing sample rates",
+                       info["skipped_sample_rate_chunks"])
+    if comparison is None:
+        LOGGER.warning("PSD comparison unavailable: no valid matched segments")
+    else:
+        output.plot_psd(comparison["frequency_hz"], comparison["before"],
+                        comparison["after"], out_dir / "psd.png", info["stage"])
+        if out_cfg.get("save_numpy", True):
+            np.savez(out_dir / "psd.npz", **comparison)
+
+    psd = state_1["psd_avg"]
+    if psd is None:
+        info["weighting_psd_status"] = "unavailable: no preparation PSD"
+        LOGGER.warning("Weighting PSD diagnostic unavailable: no preparation PSD")
+    else:
+        finite_detectors = np.all(np.isfinite(psd), axis=0)
+        if not np.any(finite_detectors):
+            info["weighting_psd_status"] = "unavailable: no finite detector spectra"
+            LOGGER.warning("Weighting PSD diagnostic unavailable: no finite detector spectra")
+        else:
+            spectra = psd if finite_detectors.all() else psd[:, finite_detectors]
+            freqs = state_1["psd_freqs"]
+            summary = np.percentile(spectra, [25, 50, 75], axis=1)
+            info["weighting_psd_status"] = "available"
+            info["weighting_psd_finite_detectors"] = int(np.count_nonzero(finite_detectors))
+            output.plot_weighting_psd(freqs, summary, state_1["obs_info"]["sample_rate_hz"],
+                                      out_dir / "weighting_psd.png")
+            if out_cfg.get("save_numpy", True):
+                np.savez(
+                    out_dir / "weighting_psd.npz", frequency_hz=freqs,
+                    p25=summary[0], median=summary[1], p75=summary[2],
+                    detector_names=np.asarray(state_1["all_kids"], dtype=str),
+                    white_noise_floor=state_1["white_noise_floor"],
+                )
+    return info
+
+
 # ============================================================================ #
 # _saveOutputs
 def _saveOutputs(
@@ -1081,12 +1240,6 @@ def _saveOutputs(
     
     print(" | Saved diagnostics")
 
-    # output.plot_psd(
-    #     step2_res["raw_sample"]["raw"], step2_res["cm_sample"]["cm"],
-    #     step2_res["sr"], os.path.join(out_dir, "psd.png")
-    # )
-    # print("    Saved psd.png")
-
     # output.plot_tod_rms(step2_res["tod_rms_data"], os.path.join(out_dir, "tod_rms.png"))
     # print("    Saved tod_rms.png")
 
@@ -1101,6 +1254,7 @@ def _saveOutputs(
     # Metadata
     elapsed = time.perf_counter() - t_total
     metadata = _buildMetadata(cfg, state_1, state_3['cm_maps'], state_3['pass_times'], metrics, timestamp, elapsed)
+    metadata["psd_diagnostics"] = _savePsdDiagnostics(state_1, state_3, out_dir, cfg["output"])
     return out_dir, metadata
 
 

@@ -111,8 +111,8 @@ weight_cap_factor = 5.0
 # - compute_time_null: even/odd chunk-parity half-difference, reusing main binning.
 # - compute_detsplit_null: balanced random detector halves; costs two extra
 #   binChunk calls per chunk on the final pass.
-compute_time_null     = false
-compute_detsplit_null = false
+compute_time_null     = true
+compute_detsplit_null = true
 
 # ---------------------------------------------------------------- #
 # pipeline.cosmic_rays
@@ -137,9 +137,12 @@ max_width = 5 # Max spike width to be considered cosmic ray.
 # output
 [output]
 output_dir = "output"
-obs_object = "RCW92"
+obs_object = "JupiterSim"
 save_numpy = true
 save_png   = false
+# PSD diagnostic plots are saved independently of save_png. When save_numpy
+# is true, the underlying spectra and detector noise floors are also saved.
+save_psd   = true
 
 # ---------------------------------------------------------------- #
 # per_detector

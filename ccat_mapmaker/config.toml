@@ -1,25 +1,49 @@
-# ============================================================
+# ============================================================================ #
+# config.toml
 # CCAT Quick-Look Mapmaker -- Configuration File
-# ============================================================
+#
+# James Burgoyne, jamesrburgoyne@icloud.com
+# Audrey Yang, audyang@student.ubc.ca
+# Vlad Grecu, vlad.grecu07@gmail.com
+# CCAT 2026
+# ============================================================================ #
+
+# Quick setup:
+# 1. Modify the 'data' section for your input dir and file formats.
+# 2. Detector layout?
+# 3. Modify 'map' section if you want to specify map extent, center, or resolution. Extent and center can be automatically determined from data, but resolution cannot. Higher resolution takes more time.
+# The rest of the sections are configured by default for a balance between speed and accuracy. Feel free to read through them and modify to your needs.
+ 
+
 
 
 # ============================================================================ #
-# data
+# DATA
+# Input directories and file formats.
 [data]
 
+
+# Input directories. (list)
+# Will merge all data in these directories into one map.
 # input_dirs = ["/home/player1/map_making_vlad/sample_h5"]
 input_dirs = ["/home/player1/map_making_vlad/ramses_sim_data/planet_ATMdata_d3426/sim_PCAM280_h5_Jupiter_d3426"]
 
-# "g3", "h5"
+# File format. (string)
+# Options: "g3", "h5".
 file_format = "h5"
 
-# "simulation", "lab"
+# Data organization format. (string)
+# Options: "simulation", "lab".
 format = "simulation" 
 
 
+
+
 # ============================================================================ #
-# map
+# MAP
+# Map settings including center, edges, and resolution.
 [map]
+
 
 # Map centre in celestial coordinates (degrees).
 # Priority: ra0_deg/dec0_deg (if both set) > target > auto (mean boresight).
@@ -44,9 +68,13 @@ res_arcmin = 0.25 # arcmin
 compare_boresight = false
 
 
-# ---------------------------------------------------------------- #
-# pipeline
+
+
+# ============================================================================ #
+# PIPELINE
+# Pipeline settings including data handling, cleaning, detector exclusions, weighting, and diagnostics.
 [pipeline]
+
 
 # ---------------------------------------------------------------- #
 #   Chunking & time window
@@ -70,12 +98,14 @@ chunk_memory_gb = 0.0
 # chunk_memory_* to size processing chunks from available memory.
 time_chunk_size = 0
 
+
 # ---------------------------------------------------------------- #
 #   Common-mode & cleaning
 
 # Common-mode subtraction iterations after the naive map.
 # 0 = naive map only, 3-5 = good balance of quality vs runtime.
 n_iterations = 3
+
 
 # ---------------------------------------------------------------- #
 #   Detector exclusion
@@ -93,6 +123,7 @@ auto_exclude_threshold = 0
 # Set to 0 to disable.
 wnf_exclude_sigma = 3.0
 
+
 # ---------------------------------------------------------------- #
 #   Map weighting
 
@@ -105,6 +136,7 @@ wnf_exclude_sigma = 3.0
 # counts equally).
 weight_cap_factor = 5.0
 
+
 # ---------------------------------------------------------------- #
 #   Diagnostics
 
@@ -116,28 +148,37 @@ weight_cap_factor = 5.0
 compute_time_null     = true
 compute_detsplit_null = true
 
+
 # ---------------------------------------------------------------- #
-# pipeline.cosmic_rays
+#   Cosmic rays
 [pipeline.cosmic_rays]
 sigma = 3.5 # Spike threshold, in units of sigma*std(tod).
 n = 2 # Samples masked on each side of a detected spike.
 max_width = 5 # Max spike width to be considered cosmic ray.
 
+
 # ---------------------------------------------------------------- #
-# pipeline.highpass
+#   Highpass
 # [pipeline.highpass]
 # cutoff_hz = 0.0
 
+
 # ---------------------------------------------------------------- #
-# pipeline.notch
+#   Notch
 # [pipeline.notch]
 # freq_hz      = 60.0 # 50.0 at FYST
 # n_harmonics  = 5 # includes the fundamental as harmonic 1
 # bandwidth_hz = 1.0 # width of each notch
 
-# ---------------------------------------------------------------- #
-# output
+
+
+
+# ============================================================================ #
+# OUTPUT
+# Output options including directory, naming, and output products.
 [output]
+
+
 output_dir = "output"
 obs_object = "qlmm" # affects dir name and similar
 save_numpy = true
@@ -145,6 +186,7 @@ save_png   = false
 # PSD diagnostic plots are saved independently of save_png. When save_numpy
 # is true, the underlying spectra and detector noise floors are also saved.
 save_psd   = true
+
 
 # ---------------------------------------------------------------- #
 # per_detector

@@ -43,7 +43,7 @@ from scipy.ndimage import gaussian_filter
 import tomllib as toml
 from datetime import datetime, timedelta, timezone
 
-from spt3g import core # type: ignore
+from spt3g import core
 
 from mapmaker import tod
 from mapmaker import map

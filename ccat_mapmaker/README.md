@@ -1,11 +1,11 @@
 # CCAT Quick-Look Mapmaker
 
-Standalone command-line mapmaker for CCAT Prime Cam. Reads `.g3` or `.h5` detector data files (TOAST simulations, or real BLAST-TNG data), cleans and bins the timestreams, runs iterative common-mode subtraction, and saves sky maps to disk.
+Standalone command-line mapmaker for CCAT Prime Cam. Reads `.g3` or `.h5` detector data files (TOAST simulations, or real lab data), cleans and bins the timestreams, runs iterative common-mode subtraction, and saves sky maps to disk.
 
 ## Prerequisites
 
 - [Anaconda](https://www.anaconda.com/download) (or Miniconda)
-- `.g3`/`.h5` simulation files, or real BLAST-TNG `.g3` files
+- `.g3`/`.h5` simulation or lab format files.
 
 ## Setup
 

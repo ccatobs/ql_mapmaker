@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -104,6 +105,8 @@ class RunDiagnosticsTests(unittest.TestCase):
             self.assertEqual(metadata["convergence"]["map_diff_rms"][0], None)
             self.assertIn("preparation", metadata["stage_times_s"])
             self.assertIn("it_1", metadata["pass_processing"])
+            self.assertEqual(metadata["null_products"], {})
+            self.assertFalse((run / "null.npy").exists())
 
     def test_failed_preparation_retains_config_log_and_status(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -154,6 +157,132 @@ class RunDiagnosticsTests(unittest.TestCase):
             {"auto_exclude_threshold": 0, "wnf_exclude_sigma": 1})
         self.assertEqual(result["keep_idx"].tolist(), [0, 1])
         self.assertEqual(result["wnf_excluded"], ["c"])
+
+    def test_weighted_nulls_and_missing_split_coverage(self):
+        state = {
+            "nx": 3, "ny": 1, "keep_idx": np.arange(2),
+            "det_offsets_kept": np.zeros(2), "det_noise": np.ones(2),
+            "ra_edges": np.arange(4, dtype=float), "dec_edges": np.array([0., 1.]),
+        }
+        cfg = {"pipeline": {"compute_time_null": True, "compute_detsplit_null": True}}
+
+        def chunks():
+            for index, signal, ra, flags in (
+                (0, [[10, 14], [18, 26], [4, 999]],
+                 [[.5, .5], [1.5, 1.5], [2.5, 2.5]], [[0, 0], [0, 0], [0, 1]]),
+                (1, [[8, 12], [5, 7], [0, 0]],
+                 [[.5, .5], [1.5, 1.5], [3.5, 3.5]], [[0, 0], [0, 1], [0, 0]]),
+            ):
+                yield self.runner.reader.Chunk(
+                    kids=["a", "b"], signal=np.array(signal, dtype=float),
+                    common_mode=None, ra=np.array(ra), dec=np.full((3, 2), .5),
+                    ra_bore=np.full(3, .5), dec_bore=np.full(3, .5),
+                    t_start=float(index), t_stop=float(index + 1), sample_rate=3.,
+                    chunk_index=index, flags=np.array(flags),
+                )
+
+        with mock.patch.object(self.runner.reader, "iter_chunks", side_effect=lambda cfg: chunks()):
+            result = self.runner._mapPass(
+                cfg, state, common_mode=False, weights=np.array([1., 3.]))
+            without_nulls = self.runner._mapPass(
+                cfg, state, common_mode=False, weights=np.array([1., 3.]),
+                compute_nulls=False)
+            detector_only = self.runner._mapPass(
+                {"pipeline": {"compute_time_null": False, "compute_detsplit_null": True}},
+                state, common_mode=False, weights=np.array([1., 3.]))
+        np.testing.assert_allclose(result["null_map"], [[1., 9.5, np.nan]], equal_nan=True)
+        sign = 1 if result["detector_split_assignment"][0] == 0 else -1
+        np.testing.assert_allclose(
+            result["detsplit_null_map"], [[-2. * sign, -7.25 * sign, np.nan]],
+            equal_nan=True)
+        np.testing.assert_allclose(result["time_split_weights"], [[[4., 4., 1.]], [[4., 1., 0.]]])
+        np.testing.assert_allclose(result["combined"], without_nulls["combined"], equal_nan=True)
+        self.assertIsNone(without_nulls["null_map"])
+        self.assertIsNone(without_nulls["detsplit_null_map"])
+        self.assertIsNone(detector_only["null_map"])
+        np.testing.assert_allclose(
+            detector_only["detsplit_null_map"], result["detsplit_null_map"], equal_nan=True)
+
+        def constant_chunks():
+            for chunk in chunks():
+                chunk.signal[:] = 10
+                yield chunk
+
+        with mock.patch.object(self.runner.reader, "iter_chunks",
+                               side_effect=lambda cfg: constant_chunks()):
+            constant = self.runner._mapPass(
+                cfg, state, common_mode=False, weights=np.array([1., 3.]))
+        for key in ("null_map", "detsplit_null_map"):
+            np.testing.assert_allclose(constant[key][np.isfinite(constant[key])], 0.)
+
+    def test_no_time_overlap_is_reported(self):
+        cfg = {"pipeline": {"compute_time_null": True, "compute_detsplit_null": False}}
+        state = {"nx": 1, "ny": 1, "keep_idx": np.arange(2),
+                 "det_offsets_kept": np.zeros(2), "det_noise": np.ones(2),
+                 "ra_edges": np.array([0., 1.]), "dec_edges": np.array([0., 1.])}
+        chunk = self.runner.reader.Chunk(
+            kids=["a", "b"], signal=np.ones((2, 2)), common_mode=None,
+            ra=np.full((2, 2), .5), dec=np.full((2, 2), .5),
+            ra_bore=np.full(2, .5), dec_bore=np.full(2, .5),
+            t_start=0., t_stop=1., sample_rate=2., chunk_index=0,
+            flags=np.zeros((2, 2), dtype=int),
+        )
+        with mock.patch.object(self.runner.reader, "iter_chunks", return_value=iter([chunk])), \
+             self.assertLogs("ccat_mapmaker", level="WARNING") as logs:
+            result = self.runner._mapPass(cfg, state, common_mode=False, weights=np.ones(2))
+        self.assertTrue(np.isnan(result["null_map"]).all())
+        self.assertIn("no finite overlap", logs.output[0])
+
+    def test_detector_null_requires_two_detectors(self):
+        cfg = {"pipeline": {"compute_time_null": False, "compute_detsplit_null": True}}
+        state = {"nx": 1, "ny": 1, "det_offsets_kept": np.zeros(1)}
+        with self.assertRaisesRegex(ValueError, "at least two retained detectors"):
+            self.runner._mapPass(cfg, state)
+
+    def test_saved_nulls_come_from_last_pass(self):
+        for iterations in (0, 1):
+            with self.subTest(iterations=iterations), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                config, _ = self.make_config(root)
+                text = config.read_text().replace("n_iterations = 1", f"n_iterations = {iterations}")
+                text = text.replace("compute_time_null = false", "compute_time_null = true")
+                text = text.replace("compute_detsplit_null = false", "compute_detsplit_null = true")
+                config.write_text(text)
+
+                def two_chunks(files, *args, **kwargs):
+                    for chunk in self.fake_chunks(files, *args, **kwargs):
+                        yield chunk
+                        yield replace(chunk, signal=chunk.signal * 2, chunk_index=1,
+                                      t_start=chunk.t_stop, t_stop=2 * chunk.t_stop)
+
+                calls = []
+                original = self.runner._mapPass
+
+                def capture(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    calls.append((kwargs["compute_nulls"], result))
+                    return result
+
+                with mock.patch.object(sys, "argv", ["run_mapmaker", "--config", str(config)]), \
+                     mock.patch.object(self.runner.reader, "_iter_h5_simulation_chunks", two_chunks), \
+                     mock.patch.object(self.runner, "_mapPass", side_effect=capture):
+                    self.runner.main()
+                run, = (root / "results").iterdir()
+                metadata = json.loads((run / "metadata.json").read_text())
+                self.assertEqual([enabled for enabled, _ in calls], [False] * iterations + [True])
+                for filename, key in (("null.npy", "null_map"),
+                                      ("detsplit_null.npy", "detsplit_null_map")):
+                    actual = np.load(run / filename)
+                    self.assertGreater(np.isfinite(actual).sum(), 0)
+                    np.testing.assert_allclose(actual, calls[-1][1][key], equal_nan=True)
+                np.testing.assert_allclose(
+                    np.load(run / "time_split_weight_0.npy"),
+                    calls[-1][1]["time_split_weights"][0])
+                for kind in ("time", "detector"):
+                    self.assertEqual(metadata["null_products"][kind]["stage"], f"it_{iterations}")
+                    self.assertGreater(metadata["null_products"][kind]["overlap_finite_pixels"], 0)
+                groups = metadata["null_products"]["detector"]["groups"]
+                self.assertEqual(sorted(len(group) for group in groups), [1, 1])
 
 
 if __name__ == "__main__":

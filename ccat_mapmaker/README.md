@@ -262,10 +262,12 @@ Each run does the following:
 | `naive.npy` / `.png` | Map with no common-mode subtraction |
 | `it_0.npy` / `.png` | After first common-mode pass |
 | `it_N.npy` / `.png` | Map after N common-mode iterations |
-| `hits.npy` / `.png` | Sum of detector weights per pixel; raw sample count only with uniform weights |
-| `noise.npy` / `.png` | Sample-scatter-based estimate; not yet validated as an uncertainty for weighted or correlated samples |
-| `null.npy` / `time_null.png` | Initial-pass chunk-parity half-difference, if `compute_time_null = true` |
-| `detsplit_null.npy` / `.png` | Random 50/50 detector-split half-difference null map, if `compute_detsplit_null = true` |
+| `hits.npy` / `.png` | Initial-pass sum of detector weights per pixel; raw sample count only with uniform weights |
+| `noise.npy` / `.png` | Initial-pass sample-scatter estimate; not yet validated as an uncertainty for weighted or correlated samples |
+| `null.npy` / `time_null.png` | Final-pass even/odd chunk-parity half-difference, if `compute_time_null = true` |
+| `detsplit_null.npy` / `.png` | Final-pass balanced random detector-split half-difference, if `compute_detsplit_null = true` |
+| `time_split_weight_0.npy`, `time_split_weight_1.npy` | Final-pass time-split per-pixel weight sums, if enabled |
+| `detector_split_weight_0.npy`, `detector_split_weight_1.npy` | Final-pass detector-split per-pixel weight sums, if enabled |
 | `ra_edges.npy`, `dec_edges.npy` | Pixel grid edges (for loading maps in numpy) |
 | `diagnostics.png` | Peak signal, off-source RMS, convergence, and runtime per pass |
 | `psd.png` | Timestream PSD before vs. after common-mode subtraction |
@@ -288,8 +290,22 @@ counts cover retained detectors in chunks that were not entirely input-flagged;
 can overlap. Chunk sizes are time samples per chunk. Convergence's off-source
 RMS uses pixels below the final map's median, not a verified source-free region;
 map quality statistics and null maps are diagnostics, not fidelity tests.
-The null products are from the initial common-mode pass, not the final iteration.
 Non-finite diagnostic values are stored as JSON null.
+
+Null maps are `(split_0 - split_1) / 2`, with `NaN` where either split lacks
+coverage. Their weight maps are sums of detector weights, not necessarily
+sample counts. Inspect both split weights: unequal coverage or weighting
+changes the null's expected noise, and partial overlap is not an all-sky test.
+The detector split is balanced in detector count, uses seed 0, and requires at
+least two retained detectors; its assignments and overlap counts are recorded
+in `metadata.json`. The time split depends on chunk boundaries, so auto chunk
+sizing can change it between runs.
+
+Both splits reuse the same common-mode estimate and previous full-sky map;
+they are **not independently processed reconstructions**. Common artifacts can
+cancel, while different coverage and filtering can leave sky residuals. A
+passing null does not prove a map is unbiased, and the half-difference is not
+automatically a calibrated noise estimate.
 
 ### Loading a map in Python
 

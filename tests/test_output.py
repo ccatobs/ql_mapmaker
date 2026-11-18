@@ -82,5 +82,18 @@ class MapCoverageTests(unittest.TestCase):
                 np.array([-2.0, -1.0, 0.0]))
 
 
+class NullPlotTests(unittest.TestCase):
+    def test_all_unobserved_null_has_safe_plot_scale(self):
+        null = np.full((2, 2), np.nan)
+        scale = output._global_scale([("null", null)])
+        self.assertEqual(scale, (-1.0, 1.0))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "null.png"
+            output._plot_map(
+                null, np.arange(3), np.arange(3), filepath=path,
+                vmin=scale[0], vmax=scale[1])
+            self.assertTrue(path.is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

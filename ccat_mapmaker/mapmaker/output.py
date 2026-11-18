@@ -12,6 +12,7 @@ import json
 import math
 import pathlib
 from datetime import date, datetime, time
+from typing import Optional
 import numpy as np
 
 import matplotlib
@@ -157,23 +158,14 @@ def saveMaps(
         ra_edges: np.ndarray, dec_edges: np.ndarray,
         output_dir: pathlib.Path,
         out_cfg: dict,
-        detsplit_null: np.ndarray = None
+        detsplit_null: np.ndarray = None,
+        time_split_weights: Optional[list[np.ndarray]] = None,
+        detector_split_weights: Optional[list[np.ndarray]] = None,
         ):
     """Save naive map, CM iteration maps, hits, noise, and null to disk.
 
-    noise: per-pixel RMS of the mean, from the actual sample scatter
-           (E[x^2] - E[x]^2) / hits, see run_mapmaker._streaming_pass.
-    time_null:  half-difference of two chunk-split independent maps: should
-           show no residual structure if the combined map's features are
-           real signal rather than noise (a jackknife/null test). None if
-           run_mapmaker._streaming_pass(compute_time_null=False) -- skipped.
-    detsplit_null: optional null map from a random 50/50 *detector*-identity
-             split (vs. `time_null`'s chunk- time split) -- see
-             run_mapmaker._streaming_pass(compute_detsplit_null=True).
-
-    Writes .npy and .png for each map, plus an overview grid (overview.png).
-    Grid layout: naive + all CM iterations in the top rows, hits + noise +
-    null below.
+    Null maps are half-differences on split overlap, using shared processing
+    and the final pass. Split weights are saved when NumPy output is enabled.
     """
 
     output_dir = pathlib.Path(output_dir)
@@ -189,6 +181,11 @@ def saveMaps(
     if out_cfg.get("save_numpy", True):
         for label, m in all_maps:
             np.save(output_dir / f"{label}.npy", m)
+        for label, split_weights in (("time", time_split_weights),
+                                     ("detector", detector_split_weights)):
+            if split_weights is not None:
+                for i, weights in enumerate(split_weights):
+                    np.save(output_dir / f"{label}_split_weight_{i}.npy", weights)
         np.save(output_dir / "ra_edges.npy",  ra_edges)
         np.save(output_dir / "dec_edges.npy", dec_edges)
 
@@ -584,6 +581,8 @@ def _percentile_scale(m: np.ndarray):
 # ============================================================================ #
 def _global_scale(maps: list[tuple[str, np.ndarray]]):
     all_vals = np.concatenate([m[np.isfinite(m)].ravel() for _, m in maps])
+    if not all_vals.size:
+        return -1.0, 1.0
     half = max(abs(np.percentile(all_vals, 1)), abs(np.percentile(all_vals, 99.5)))
     if half == 0:
         half = 1.0

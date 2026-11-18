@@ -479,11 +479,12 @@ def _mapPass(
     common_mode: bool = True,
     weights: np.ndarray = None,
     also_naive: bool = False,
+    compute_nulls: bool = True,
     ):
 
     pipe_cfg = cfgs['pipeline']
-    compute_time_null = pipe_cfg.get("compute_time_null", True)
-    compute_detsplit_null = pipe_cfg.get("compute_detsplit_null", True)
+    compute_time_null = compute_nulls and pipe_cfg.get("compute_time_null", True)
+    compute_detsplit_null = compute_nulls and pipe_cfg.get("compute_detsplit_null", True)
     boresight_only = False
     nx, ny = state_1['nx'], state_1['ny']
 
@@ -509,7 +510,13 @@ def _mapPass(
     null_hits = zerosMapList() if compute_time_null else None
     detsplit_data = zerosMapList() if compute_detsplit_null else None
     detsplit_hits = zerosMapList() if compute_detsplit_null else None
-    det_half = np.random.default_rng(0).integers(0, 2, size=n_dets_kept)
+    det_half = None
+    if compute_detsplit_null:
+        if n_dets_kept < 2:
+            raise ValueError("Detector-split null requires at least two retained detectors")
+        order = np.random.default_rng(0).permutation(n_dets_kept)
+        det_half = np.ones(n_dets_kept, dtype=int)
+        det_half[order[:n_dets_kept // 2]] = 0
     psd_raw = psd_cm = None
     tod_rms_data: list = []
     stats = {
@@ -641,6 +648,10 @@ def _mapPass(
         if also_naive:
             naive = np.where(naive_hits>0, naive_data/naive_hits, np.nan)
 
+    for label, null in (("time", null_map), ("detector", detsplit_null_map)):
+        if null is not None and not np.isfinite(null).any():
+            LOGGER.warning("%s null has no finite overlap between split maps", label)
+
     return {
         'combined': combined,
         'naive': naive,
@@ -649,6 +660,9 @@ def _mapPass(
         'processing_stats': stats,
         'null_map': null_map,
         'detsplit_null_map': detsplit_null_map,
+        'time_split_weights': null_hits,
+        'detector_split_weights': detsplit_hits,
+        'detector_split_assignment': det_half,
         'n_dets': n_dets,
         'sample_rate': sample_rate,
         'tod_rms_data': tod_rms_data
@@ -742,6 +756,8 @@ def _mapPrep(cfg: dict) -> dict:
     print(f" | Using {len(s_de['keep_idx'])}/{len(s_fp['all_kids'])} detectors")
     if len(s_de["keep_idx"]) == 0:
         raise ValueError("All detectors were excluded; check detector selection and thresholds")
+    if cfg["pipeline"].get("compute_detsplit_null", True) and len(s_de["keep_idx"]) < 2:
+        raise ValueError("Detector-split null requires at least two retained detectors")
     manual_names = set(cfg["pipeline"].get("exclude_detectors", []))
     manual_indices = set(cfg["pipeline"].get("exclude_detector_indices", []))
     manual_excluded = [
@@ -826,7 +842,8 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
     # Share the input read and cleaning work between the naive and CM maps.
     t = time.perf_counter()
     s_sp = _mapPass(
-        cfg, state_1, weights=state_1["det_weights_kept"], also_naive=True)
+        cfg, state_1, weights=state_1["det_weights_kept"], also_naive=True,
+        compute_nulls=pipe_cfg["n_iterations"] == 0)
     initial_pass_time = time.perf_counter() - t
 
     print(f" | Naive + initial common-mode maps (chunk_duration_s={chunk_s})")
@@ -840,6 +857,9 @@ def _makeMaps(cfg: dict, state_1: dict) -> dict:
         "noise_map": s_sp['noise_map'],
         "null_map": s_sp['null_map'],
         "detsplit_null_map": s_sp['detsplit_null_map'],
+        "time_split_weights": s_sp["time_split_weights"],
+        "detector_split_weights": s_sp["detector_split_weights"],
+        "detector_split_assignment": s_sp["detector_split_assignment"],
         "sr": s_sp['sample_rate'],
         "tod_rms_data": s_sp['tod_rms_data'],
         "t_initial": initial_pass_time,
@@ -862,6 +882,7 @@ def _makeIterativeMaps(
     cm_maps = [("it_0", combined_map.copy())]
     pass_times = [("naive + it_0", state_2["t_initial"])]
     pass_stats = {"naive + it_0": state_2["processing_stats"]}
+    null_result = state_2
 
     if n_iters > 0:
 
@@ -872,8 +893,10 @@ def _makeIterativeMaps(
             s_sp = _mapPass(
                 cfg, state_1, weights=state_1["det_weights_kept"],
                 current_map=combined_map,
-                also_naive=True)
+                also_naive=True, compute_nulls=i == n_iters)
             combined_map = s_sp['combined']
+            if i == n_iters:
+                null_result = s_sp
 
             t_iter = time.perf_counter() - t
             print(f" | Iteration {i}/{n_iters} [{t_iter:.1f}s]")
@@ -891,6 +914,11 @@ def _makeIterativeMaps(
         'cm_maps': cm_maps,
         'pass_times': pass_times,
         'pass_stats': pass_stats,
+        'null_map': null_result['null_map'],
+        'detsplit_null_map': null_result['detsplit_null_map'],
+        'time_split_weights': null_result['time_split_weights'],
+        'detector_split_weights': null_result['detector_split_weights'],
+        'detector_split_assignment': null_result['detector_split_assignment'],
     }
 
 
@@ -987,6 +1015,35 @@ def _mapQuality(final_map, hits, ra_edges, dec_edges):
     return quality
 
 
+def _nullMetadata(state_1, state_3):
+    products = {}
+    for label, map_key, weight_key in (
+            ("time", "null_map", "time_split_weights"),
+            ("detector", "detsplit_null_map", "detector_split_weights")):
+        null = state_3[map_key]
+        if null is None:
+            continue
+        weights = state_3[weight_key]
+        products[label] = {
+            "stage": state_3["cm_maps"][-1][0],
+            "definition": "(split_0 - split_1) / 2",
+            "shared_processing": True,
+            "split_covered_pixels": [int(np.count_nonzero(w > 0)) for w in weights],
+            "overlap_finite_pixels": int(np.count_nonzero(np.isfinite(null))),
+        }
+    if "time" in products:
+        products["time"]["split"] = "chunk index parity"
+    if "detector" in products:
+        assignment = state_3["detector_split_assignment"]
+        products["detector"]["split"] = "balanced random detector groups"
+        products["detector"]["seed"] = 0
+        products["detector"]["groups"] = [
+            [name for name, half in zip(state_1["kids_kept"], assignment) if half == i]
+            for i in (0, 1)
+        ]
+    return products
+
+
 # ============================================================================ #
 # _saveOutputs
 def _saveOutputs(
@@ -999,9 +1056,11 @@ def _saveOutputs(
     LOGGER.info("Writing map arrays and images to %s", out_dir)
     output.saveMaps(
         state_2["naive"], state_3['cm_maps'], 
-        state_2["hits"], state_2["noise_map"], state_2["null_map"], 
+        state_2["hits"], state_2["noise_map"], state_3["null_map"],
         state_1["ra_edges"], state_1["dec_edges"],
-        out_dir, cfg["output"], detsplit_null=state_2["detsplit_null_map"]
+        out_dir, cfg["output"], detsplit_null=state_3["detsplit_null_map"],
+        time_split_weights=state_3["time_split_weights"],
+        detector_split_weights=state_3["detector_split_weights"],
     )
 
     print(" | Saved maps")
@@ -1273,6 +1332,7 @@ def main():
         out_dir, map_metadata = _saveOutputs(
             cfgs, state_1, state_2, state_3, t_total, timestamp, out_dir)
         metadata.update(map_metadata)
+        metadata["null_products"] = _nullMetadata(state_1, state_3)
         metadata["map_quality"] = _mapQuality(
             state_3["combined_map"], state_2["hits"],
             state_1["ra_edges"], state_1["dec_edges"])

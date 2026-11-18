@@ -106,12 +106,11 @@ weight_cap_factor = 5.0
 # ---------------------------------------------------------------- #
 #   Diagnostics
 
-# Jackknife/null-test maps -- both are diagnostics for checking that
-# apparent map features are real signal, not noise, and can be turned off
-# independently of each other and of the hits/noise (RMS) maps, which are
-# always computed.
-# - compute_time_null: even/odd chunk-parity half-difference. Numerically free (reuses the main bin_chunk result); disabling it just skips its .npy/.png output.
-# - compute_detsplit_null: random 50/50 detector-identity half-difference. Costs 2 extra bin_chunk calls per chunk -- the one that's actually worth turning off for speed.
+# Final-pass null maps, independently enabled. These are diagnostics, not
+# independent reconstructions: both halves share common-mode and sky estimates.
+# - compute_time_null: even/odd chunk-parity half-difference, reusing main binning.
+# - compute_detsplit_null: balanced random detector halves; costs two extra
+#   binChunk calls per chunk on the final pass.
 compute_time_null     = false
 compute_detsplit_null = false
 

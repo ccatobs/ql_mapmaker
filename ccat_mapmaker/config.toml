@@ -25,8 +25,9 @@
 
 # Input directories. (list)
 # Will merge all data in these directories into one map.
-# input_dirs = ["/home/player1/map_making_vlad/sample_h5"]
-input_dirs = ["/home/player1/map_making_vlad/ramses_sim_data/planet_ATMdata_d3426/sim_PCAM280_h5_Jupiter_d3426"]
+# input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/lab/sample_h5"]
+# input_dirs = ["/Users/james/notebooks/data/ql_mm_samples/lab/sample_h5"]
+input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/planet_ATMdata_d3426/sim_PCAM280_h5_Jupiter_d3426"]
 
 # File format. (string)
 # Options: "g3", "h5".

@@ -134,7 +134,7 @@ class RunDiagnosticsTests(unittest.TestCase):
 
     def test_auto_extent_contains_retained_unflagged_samples_in_map_pass(self):
         cfg = {
-            "map": {"auto_extent": True, "ra0_deg": 10., "dec0_deg": 20.,
+            "map": {"ra0_deg": 10., "dec0_deg": 20.,
                     "res_arcmin": 15.},
             "pipeline": {"auto_exclude_threshold": 0, "wnf_exclude_sigma": 0,
                          "exclude_detector_indices": [1], "weight_cap_factor": 0,
@@ -170,9 +170,33 @@ class RunDiagnosticsTests(unittest.TestCase):
         np.testing.assert_allclose(np.diff(state["dec_edges"]), .25)
         self.assertEqual(np.sum(result["total_hits"]), 2 * 64 * 2 - 2)
 
+    def test_axes_are_auto_sized_independently(self):
+        def chunks(_cfg):
+            n = 8
+            yield self.runner.reader.Chunk(
+                kids=["a"], signal=np.ones((n, 1)), common_mode=None,
+                ra=np.full((n, 1), 10.), dec=np.linspace(19., 21., n)[:, None],
+                ra_bore=np.full(n, 10.), dec_bore=np.full(n, 20.),
+                t_start=0., t_stop=8., sample_rate=1., chunk_index=0,
+                flags=np.zeros((n, 1), dtype=int))
+
+        base = {"ra0_deg": 10., "dec0_deg": 20., "res_arcmin": 30.}
+        pipe = {"auto_exclude_threshold": 0, "wnf_exclude_sigma": 0,
+                "weight_cap_factor": 0, "compute_detsplit_null": False}
+        with mock.patch.object(self.runner.reader, "iter_chunks", side_effect=chunks):
+            fixed_x = self.runner._mapPrep({"map": {**base, "xlen_deg": 3.}, "pipeline": pipe})
+            fixed_y = self.runner._mapPrep({"map": {**base, "ylen_deg": 1.}, "pipeline": pipe})
+        self.assertEqual(fixed_x["nx"], 6)
+        self.assertAlmostEqual(fixed_x["ra_edges"][-1] - fixed_x["ra_edges"][0], 3.)
+        self.assertLess(fixed_x["dec_edges"][0], 19.)
+        self.assertGreater(fixed_x["dec_edges"][-1], 21.)
+        self.assertEqual(fixed_y["ny"], 2)
+        self.assertLess(fixed_y["ra_edges"][0], 10.)
+        self.assertGreater(fixed_y["ra_edges"][-1], 10.)
+
     def test_auto_extent_supports_boresight_only_and_rejects_missing_pointing(self):
         cfg = {
-            "map": {"auto_extent": True, "res_arcmin": 60.},
+            "map": {"res_arcmin": 60.},
             "pipeline": {"auto_exclude_threshold": 0, "wnf_exclude_sigma": 0,
                          "weight_cap_factor": 0, "compute_detsplit_null": False},
         }
@@ -214,7 +238,7 @@ class RunDiagnosticsTests(unittest.TestCase):
                 data["shared/boresight_radec"] = np.tile(bore, (n, 1))
             cfg = {
                 "data": {"input_dirs": [temp], "file_format": "h5", "format": "simulation"},
-                "map": {"auto_extent": True, "res_arcmin": 30.},
+                "map": {"res_arcmin": 30.},
                 "pipeline": {"chunk_duration_s": 16., "auto_exclude_threshold": 0,
                              "wnf_exclude_sigma": 0, "weight_cap_factor": 0,
                              "compute_time_null": False, "compute_detsplit_null": False},

@@ -166,7 +166,6 @@ def _softwareProvenance():
 def _effectiveSettings(cfg):
     """Record defaults used by the main map passes, without changing behavior."""
     settings = copy.deepcopy(cfg)
-    settings["map"].setdefault("auto_extent", False)
     pipe = settings["pipeline"]
     for key, value in {
         "start_offset_s": 0.0, "max_duration_s": None,
@@ -419,9 +418,9 @@ def _prepPass(cfg: dict):
     """
 
     # Stream through chunks of time-ordered data (TOD)
-    auto_extent = cfg.get("map", {}).get("auto_extent", False)
-    if not isinstance(auto_extent, bool):
-        raise ValueError("map.auto_extent must be true or false")
+    # An axis whose length (xlen_deg/ylen_deg) is omitted is sized from the data.
+    map_cfg = cfg.get("map", {})
+    auto_extent = "xlen_deg" not in map_cfg or "ylen_deg" not in map_cfg
     init = False
     stats = {"chunk_samples": [], "detector_samples": 0,
              "input_flagged_samples": 0, "fully_flagged_chunks": 0,
@@ -916,23 +915,27 @@ def _mapPrep(cfg: dict) -> dict:
 
     # Construct coord pixel grid boundaries (edges)
     map_cfg = cfg["map"]
-    if map_cfg.get("auto_extent", False):
+    res_deg = map_cfg["res_arcmin"] / 60.0
+    auto_axes = [k for k in ("xlen_deg", "ylen_deg") if k not in map_cfg]
+    edges = map.makeMapEdges(
+        ra0_deg=s_ma['ra0_deg'], dec0_deg=s_ma['dec0_deg'],
+        xlen_deg=map_cfg.get("xlen_deg", res_deg), ylen_deg=map_cfg.get("ylen_deg", res_deg),
+        res_deg=res_deg)
+    if auto_axes:
         point_min = np.min(s_fp["pointing_min"][:, s_de["keep_idx"]], axis=1)
         point_max = np.max(s_fp["pointing_max"][:, s_de["keep_idx"]], axis=1)
         if not (np.all(np.isfinite(point_min)) and np.all(np.isfinite(point_max))):
             raise ValueError("Automatic map extent requires unflagged finite pointing for retained detectors")
-        if point_max[0] - point_min[0] > 180:
+        if "xlen_deg" in auto_axes and point_max[0] - point_min[0] > 180:
             LOGGER.warning(
                 "Automatic map extent spans more than 180 degrees in RA; "
                 "RA wraparound is not supported and the map may be very large")
-        edges = map.autoMapEdges(
-            s_ma["ra0_deg"], s_ma["dec0_deg"], point_min, point_max,
-            map_cfg["res_arcmin"] / 60.0)
-    else:
-        edges = map.makeMapEdges(
-            ra0_deg=s_ma['ra0_deg'], dec0_deg=s_ma['dec0_deg'],
-            xlen_deg=map_cfg["xlen_deg"], ylen_deg=map_cfg["ylen_deg"],
-            res_deg=map_cfg["res_arcmin"]/60.0)
+        for axis, (key, name, center) in enumerate((
+                ("xlen_deg", "ra", s_ma["ra0_deg"]), ("ylen_deg", "dec", s_ma["dec0_deg"]))):
+            if key in auto_axes:
+                edges[f"{name}_edges"] = map.autoAxisEdges(
+                    center, point_min[axis], point_max[axis], res_deg)
+                edges["nx" if axis == 0 else "ny"] = len(edges[f"{name}_edges"]) - 1
     s_ma |= edges
 
     print(f" | Map grid: {s_ma['ny']} x {s_ma['nx']} pixels", end="")
@@ -1098,8 +1101,8 @@ def _buildMetadata(
         "map_ra0_deg": step1_res["ra0_deg"],
         "map_dec0_deg": step1_res["dec0_deg"],
         "map_res_arcmin": map_cfg["res_arcmin"],
-        "map_xlen_deg": map_cfg["xlen_deg"],
-        "map_ylen_deg": map_cfg["ylen_deg"],
+        "map_xlen_deg": float(step1_res["ra_edges"][-1] - step1_res["ra_edges"][0]),
+        "map_ylen_deg": float(step1_res["dec_edges"][-1] - step1_res["dec_edges"][0]),
         "pipeline_n_iterations": pipe_cfg["n_iterations"],
         "pipeline_start_offset_s": pipe_cfg.get("start_offset_s", 0.0),
         "pipeline_max_duration_s": pipe_cfg.get("max_duration_s", None),

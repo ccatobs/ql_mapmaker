@@ -55,9 +55,8 @@ format = "simulation"
 # - Solar-system bodies ("jupiter", "saturn", "moon", "sun", ...) move, so they're looked up via ephemeris at the observation's start time from an observer site so FYST for simulation, or the gondola's own lat/lon/alt telemetry for real BLAST-TNG data (a balloon flight has no fixed site). Useful since planets are used as calibration sources.
 # - Anything else is resolved by name via SkyCoord.from_name (SIMBAD, requires network access).
 
-# Map extent. Set auto_extent = true to size the grid from retained detector
-# pointing instead; xlen_deg/ylen_deg are ignored in that mode.
-auto_extent = true
+# Map extent. Omit xlen_deg and/or ylen_deg to size that axis automatically from
+# retained detector pointing (each axis is independent).
 # xlen_deg   = 2.5 # deg
 # ylen_deg   = 1.3 # deg
 

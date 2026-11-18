@@ -228,7 +228,7 @@ class RunDiagnosticsTests(unittest.TestCase):
             n = 64
             focalplane = np.zeros(2, dtype=[("name", "S1"), ("quat", "f8", (4,))])
             focalplane["name"] = [b"a", b"b"]
-            focalplane["quat"] = Rotation.from_euler("y", [-2., 2.], degrees=True).as_quat()
+            focalplane["quat"] = Rotation.from_euler("y", [[-2.], [2.]], degrees=True).as_quat()
             bore = Rotation.from_euler("ZY", [10., 70.], degrees=True).as_quat()
             with h5py.File(path, "w") as data:
                 data["instrument/focalplane"] = focalplane

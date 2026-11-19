@@ -54,16 +54,19 @@ conda install -c conda-forge jupyterlab
 From the repository root, run `python -m unittest discover -s tests -v`.
 The sample-backed tests are skipped when their data is unavailable. By default
 they look under `~/notebooks/data/ql_mm_samples/`; set
-`CCAT_MAPMAKER_LAB_SAMPLE_DIR` or `CCAT_MAPMAKER_SIM_SAMPLE_DIR` to the
-corresponding HDF5 directory to override those locations. The lab integration
-test also needs `spt3g`; see Setup for why it is included in the environment
-for every run.
+`CCAT_MAPMAKER_LAB_SAMPLE_DIR`, `CCAT_MAPMAKER_SIM_SAMPLE_DIR`, or
+`CCAT_MAPMAKER_G3_SAMPLE_DIR` to the corresponding sample directory to override
+those locations. The lab and G3 integration tests need `spt3g`; see Setup for
+why it is included in the environment for every run.
 
 The simulation test uses `Jupiter-0-0.h5` and creates a temporary HDF5 virtual
 view of a 20-second Jupiter crossing, without copying the multi-GB detector
 arrays. It downsamples that window and checks the naive and iterative maps for
 a bright peak near Jupiter. It is a quick integration check, not a validation
 of Jupiter's resolved size, atmospheric modelling, or a full observation.
+The G3 simulation test runs `frames-0006.g3` through the same map pipeline,
+using a temporary symlink instead of copying the file, and checks for a bright
+peak near Jupiter in both the naive and iterative maps.
 
 ## Quick start
 

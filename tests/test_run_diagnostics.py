@@ -513,6 +513,85 @@ class RunDiagnosticsTests(unittest.TestCase):
                     self.assertGreater(hits[y, x], 0)
                     self.assertGreater(image[y, x], 10 * np.nanpercentile(np.abs(image), 99))
 
+    def test_toast_jupiter_g3_sample_recovers_source(self):
+        if self.spt_patch is not None:
+            self.skipTest("spt3g is required to map the G3 simulation sample")
+
+        sample_dir = Path(os.environ.get(
+            "CCAT_MAPMAKER_G3_SAMPLE_DIR",
+            Path.home() / "notebooks/data/ql_mm_samples/sim/planet_ATMdata_d3426/"
+            "sim_PCAM280_g3_Jupiter_d3426/Jupiter-0-0",
+        ))
+        sample = sample_dir / "frames-0006.g3"
+        if not sample.is_file():
+            self.skipTest(
+                "Set CCAT_MAPMAKER_G3_SAMPLE_DIR to the Jupiter G3 observation directory"
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "input"
+            source.mkdir()
+            (source / sample.name).symlink_to(sample)
+            config = root / "settings.toml"
+            config.write_text(
+                "[data]\n"
+                f"input_dirs = [{json.dumps(str(source))}]\n"
+                'file_format = "g3"\n'
+                'format = "simulation"\n'
+                "[map]\n"
+                "ra0_deg = 141.90775\n"
+                "dec0_deg = 15.60229\n"
+                "xlen_deg = 1.5\n"
+                "ylen_deg = 1.5\n"
+                "res_arcmin = 0.5\n"
+                "[pipeline]\n"
+                "chunk_duration_s = 10\n"
+                "sample_step = 10\n"
+                "n_iterations = 1\n"
+                "auto_exclude_threshold = 0\n"
+                "wnf_exclude_sigma = 0\n"
+                "weight_cap_factor = 0\n"
+                "compute_time_null = false\n"
+                "compute_detsplit_null = false\n"
+                "[output]\n"
+                f"output_dir = {json.dumps(str(root / 'results'))}\n"
+                'obs_object = "jupiter_g3_sample"\n'
+                "save_png = false\n"
+                "save_numpy = true\n"
+                "save_psd = false\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                    sys, "argv", ["run_mapmaker", "--config", str(config)]):
+                self.runner.main()
+
+            run, = (root / "results").iterdir()
+            metadata = json.loads((run / "metadata.json").read_text())
+            self.assertEqual(metadata["status"], "completed")
+            self.assertEqual(metadata["input_files_opened"], [str(sample.resolve())])
+            self.assertEqual(metadata["resolved_settings"]["pipeline"]["sample_step"], 10)
+            self.assertEqual(metadata["n_detectors"], 3426)
+            self.assertGreater(metadata["map_quality"]["covered_pixels"], 0)
+
+            ra_edges = np.load(run / "ra_edges.npy")
+            dec_edges = np.load(run / "dec_edges.npy")
+            hits = np.load(run / "hits.npy")
+            for name in ("naive", "it_1"):
+                with self.subTest(map=name):
+                    image = np.load(run / f"{name}.npy")
+                    y, x = np.unravel_index(np.nanargmax(image), image.shape)
+                    peak_ra = (ra_edges[x] + ra_edges[x + 1]) / 2
+                    peak_dec = (dec_edges[y] + dec_edges[y + 1]) / 2
+                    distance_deg = np.hypot(
+                        (peak_ra - 141.90775) * np.cos(np.deg2rad(15.60229)),
+                        peak_dec - 15.60229,
+                    )
+                    self.assertLess(distance_deg, 1 / 60)
+                    self.assertGreater(hits[y, x], 0)
+                    self.assertGreater(image[y, x], 10 * np.nanpercentile(np.abs(image), 99))
+
     def test_white_noise_exclusion_removes_indices(self):
         result = self.runner.tod.excludedDetectors(
             ["a", "b", "c"], np.ones(3), np.array([1., 1., 100.]),

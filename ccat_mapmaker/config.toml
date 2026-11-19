@@ -34,9 +34,9 @@
 # Input directories or glob patterns. (list of strings)
 # Every matching file is combined into one observation/map. Patterns are
 # expanded recursively and only files matching data.file_format are opened.
-input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/orionA_ATMdata_d100_primecam_f350/sim_PCAM280_h5_ORIONA_2026_07_15_d100"]
+# input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/orionA_ATMdata_d100_primecam_f350/sim_PCAM280_h5_ORIONA_2026_07_15_d100"]
 # input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/orionA_ATMdata_d100_primecam_f280/sim_PCAM280_h5_ORIONA_2026_07_15_d100"]
-# input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/planet_ATMdata_d3426/sim_PCAM280_h5_Jupiter_d3426"]
+input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/planet_ATMdata_d3426/sim_PCAM280_h5_Jupiter_d3426"]
 # input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/lab/sample_h5"]
 # input_dirs = ["/Users/james/notebooks/data/ql_mm_samples/lab/sample_h5"]
 

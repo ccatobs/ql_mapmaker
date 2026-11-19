@@ -1,5 +1,6 @@
 import importlib
 import json
+import os
 import sys
 import tempfile
 import types
@@ -353,6 +354,65 @@ class RunDiagnosticsTests(unittest.TestCase):
             self.assertEqual(metadata["pass_processing"]["naive + it_0"]["detector_samples"], 128)
             self.assertTrue(all(call.args[0].shape[0] == 64 and call.args[1] == 10.
                                 for call in clean.call_args_list))
+
+    def test_lab_sample_h5_generates_map_with_sample_step(self):
+        if self.spt_patch is not None:
+            self.skipTest("spt3g is required to map the lab HDF5 sample")
+
+        sample_dir = Path(os.environ.get(
+            "CCAT_MAPMAKER_LAB_SAMPLE_DIR",
+            Path.home() / "notebooks/data/ql_mm_samples/lab/sample_h5",
+        ))
+        sample_files = sorted(sample_dir.rglob("*.h5")) if sample_dir.is_dir() else []
+        if not sample_files:
+            self.skipTest(
+                "Set CCAT_MAPMAKER_LAB_SAMPLE_DIR to the lab sample HDF5 directory"
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "settings.toml"
+            config.write_text(
+                "[data]\n"
+                f"input_dirs = [{json.dumps(str(sample_dir))}]\n"
+                'file_format = "h5"\n'
+                'format = "lab"\n'
+                "[map]\n"
+                "res_arcmin = 60.0\n"
+                "[pipeline]\n"
+                "chunk_duration_s = 0\n"
+                "max_duration_s = 0.1\n"
+                "sample_step = 50\n"
+                "n_iterations = 0\n"
+                "auto_exclude_threshold = 0\n"
+                "wnf_exclude_sigma = 0\n"
+                "weight_cap_factor = 0\n"
+                "compute_time_null = false\n"
+                "compute_detsplit_null = false\n"
+                "[output]\n"
+                f"output_dir = {json.dumps(str(root / 'results'))}\n"
+                'obs_object = "lab_sample"\n'
+                "save_png = false\n"
+                "save_numpy = true\n"
+                "save_psd = false\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                    sys, "argv", ["run_mapmaker", "--config", str(config)]):
+                self.runner.main()
+
+            run, = (root / "results").iterdir()
+            metadata = json.loads((run / "metadata.json").read_text())
+            self.assertEqual(metadata["status"], "completed")
+            self.assertEqual(metadata["resolved_settings"]["pipeline"]["sample_step"], 50)
+            self.assertEqual(
+                metadata["input_files_opened"],
+                [str(sample_files[0].resolve())],
+            )
+            self.assertGreater(metadata["map_quality"]["covered_pixels"], 0)
+            self.assertTrue((run / "naive.npy").is_file())
+            self.assertTrue(np.isfinite(np.load(run / "naive.npy")).any())
 
     def test_white_noise_exclusion_removes_indices(self):
         result = self.runner.tod.excludedDetectors(

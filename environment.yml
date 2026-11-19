@@ -8,8 +8,6 @@ dependencies:
   - scipy
   - astropy
   - matplotlib
-  - jupyter
-  - jupyterlab
   - spt3g
   - h5py
   - psutil

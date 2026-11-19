@@ -4,38 +4,49 @@ Standalone command-line mapmaker for CCAT Prime Cam. Reads `.g3` or `.h5` detect
 
 ## Prerequisites
 
-- [Anaconda](https://www.anaconda.com/download) (or Miniconda)
+- [Miniforge](https://github.com/conda-forge/miniforge) (recommended) or
+  [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/). The full
+  Anaconda distribution is not required.
 - `.g3`/`.h5` simulation or lab format files.
 
 ## Setup
 
 ### First time on a new machine
 
-1. Clone this repo (or copy the `ccat_mapmaker/` directory).
+1. Clone the full repository. The environment file and tests are at the
+   repository root, alongside `ccat_mapmaker/`.
 
-2. Create the conda environment from the repo root:
+2. From the repository root, create and activate the environment:
    ```bash
    conda env create -f environment.yml
-   ```
-   This installs Python 3.11, numpy, scipy, astropy, matplotlib, spt3g, h5py, and jupyter.
-
-3. Activate it:
-   ```bash
    conda activate ccat
    ```
 
+   This installs Python 3.11 and the mapmaker's runtime dependencies, including
+   `spt3g`. The application imports `spt3g` at startup, so it is required for
+   all runs, including HDF5 simulations.
+
 ### Every time you work on this project
 
-Activate the environment before doing anything, `spt3g` is not available outside it:
+Activate the environment before running the mapmaker:
 
 ```bash
 conda activate ccat
 ```
 
-Your prompt will change from `(base)` to `(ccat)`. Deactivate when done:
+Deactivate when done if you like:
 
 ```bash
 conda deactivate
+```
+
+### Optional: Jupyter notebooks
+
+Jupyter is not needed to run the command-line mapmaker. To use the notebooks
+in `ccat_mapmaker/notebooks/`, install JupyterLab into the active environment:
+
+```bash
+conda install -c conda-forge jupyterlab
 ```
 
 ## Tests
@@ -44,8 +55,9 @@ From the repository root, run `python -m unittest discover -s tests -v`.
 The sample-backed tests are skipped when their data is unavailable. By default
 they look under `~/notebooks/data/ql_mm_samples/`; set
 `CCAT_MAPMAKER_LAB_SAMPLE_DIR` or `CCAT_MAPMAKER_SIM_SAMPLE_DIR` to the
-corresponding HDF5 directory to override those locations. The lab test also
-requires `spt3g`.
+corresponding HDF5 directory to override those locations. The lab integration
+test also needs `spt3g`; see Setup for why it is included in the environment
+for every run.
 
 The simulation test uses `Jupiter-0-0.h5` and creates a temporary HDF5 virtual
 view of a 20-second Jupiter crossing, without copying the multi-GB detector
@@ -102,7 +114,7 @@ very large maps; check the reported grid size and available memory.
 
 ### 3. Run
 
-From the `CCAT/` directory (one level above `ccat_mapmaker/`):
+From the repository root (the directory containing `environment.yml`):
 
 ```bash
 python ccat_mapmaker/run_mapmaker.py --config ccat_mapmaker/config.toml
@@ -394,18 +406,20 @@ dec_edges = np.load("output/<timestamp>/dec_edges.npy")
 ## Code structure
 
 ```
-run_mapmaker.py     entry point, drives the pipeline
-config.toml         settings (edit this)
-environment.yml     conda environment specification
-mapmaker/
-    reader.py       reads .g3/.h5 files (TOAST simulation or real BLAST-TNG) into fixed-duration chunks
-    pointing.py     converts quaternion pointing to RA/Dec
-    signal.py       I/Q to frequency shift conversion and cal-lamp normalization (real data only)
-    target.py       resolves a map centre from a target name (ephemeris or SIMBAD)
-    cleaning.py     cosmic ray removal, high-pass and notch filtering, PSD anomaly flagging
-    common_mode.py  common-mode noise subtraction
-    binning.py      bins detector samples into sky pixels
-    output.py       saves maps and diagnostics to disk
+.
+├── README.md
+├── environment.yml
+├── tests/
+└── ccat_mapmaker/
+    ├── config.toml
+    ├── run_mapmaker.py    entry point and pipeline orchestration
+    ├── mapmaker/
+    │   ├── coord.py       pointing coordinates and map-centre resolution
+    │   ├── map.py         sky grid and detector-sample binning
+    │   ├── output.py      maps, plots, and metadata
+    │   ├── reader.py      .g3/.h5 input and chunk iteration
+    │   └── tod.py         timestream cleaning, noise, and common-mode routines
+    └── notebooks/
 ```
 
 ## Troubleshooting

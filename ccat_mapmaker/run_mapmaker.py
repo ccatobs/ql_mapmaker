@@ -168,7 +168,7 @@ def _effectiveSettings(cfg):
     settings = copy.deepcopy(cfg)
     pipe = settings["pipeline"]
     for key, value in {
-        "start_offset_s": 0.0, "max_duration_s": None,
+        "start_offset_s": 0.0, "max_duration_s": None, "sample_step": 1,
         "chunk_duration_s": 1.0, "chunk_memory_fraction": 0.5,
         "chunk_memory_gb": 0.0, "auto_exclude_threshold": 5.0,
         "wnf_exclude_sigma": 3.0, "weight_cap_factor": 5.0,
@@ -447,6 +447,11 @@ def _prepPass(cfg: dict):
             sample_rate       = chunk.sample_rate
             kids              = chunk.kids
             nominal_chunk_len = chunk.signal.shape[0]
+            if cfg["pipeline"].get("sample_step", 1) > 1 and nominal_chunk_len < 4:
+                raise ValueError(
+                    "pipeline.sample_step leaves fewer than 4 samples in the first "
+                    "usable chunk; increase chunk_duration_s or reduce sample_step"
+                )
 
             ra_sum = dec_sum = n_bore = n_chunks = psd_count = 0
 

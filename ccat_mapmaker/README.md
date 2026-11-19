@@ -167,6 +167,7 @@ All settings live in `config.toml`. The most commonly changed ones:
 | `n_iterations` | `[pipeline]` | Common-mode subtraction iterations (3-5 is typical) |
 | `start_offset_s` | `[pipeline]` | Skip this many seconds at the start |
 | `max_duration_s` | `[pipeline]` | Process at most this many seconds (comment out for full obs) |
+| `sample_step` | `[pipeline]` | Retain every Nth time sample for all detectors (`1` by default) |
 | `chunk_duration_s` | `[pipeline]` | Fixed chunk duration in seconds, or `"auto"` to size chunks from available memory |
 | `chunk_memory_fraction` | `[pipeline]` | Fraction of available RAM targeted by auto sizing (default `0.5`) |
 | `chunk_memory_gb` | `[pipeline]` | Optional upper bound for the auto chunk-memory target in GiB (`0` means no explicit cap) |
@@ -178,6 +179,16 @@ All settings live in `config.toml`. The most commonly changed ones:
 | `output_dir` | `[output]` | Where to write outputs |
 
 ## Cleaning steps
+
+`sample_step = 2` retains the first sample in the selected time window and
+every second sample thereafter, continuously across chunks and files. The
+stride applies before preparation, cleaning, mapmaking, and diagnostics; the
+effective sample rate is divided by the step. This is unfiltered subsampling,
+so signals above the new Nyquist frequency can alias, and cleaning, detector
+weights, map coverage, and noise estimates can change. Sample-based cleaning
+parameters count retained samples. Input data and pointing may still be read
+at full resolution. If the first usable chunk contains fewer than four retained
+samples, increase the chunk duration or reduce the step.
 
 Set `chunk_duration_s = "auto"` to estimate the largest processing chunk from
 available memory. Auto sizing applies to every pass, including preparation:

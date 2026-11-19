@@ -87,6 +87,10 @@ compare_boresight = false
 start_offset_s = 0
 #max_duration_s = 0
 
+# Retain every Nth time sample from all detectors (1 uses every sample).
+# Larger values speed up processing but reduce time resolution.
+sample_step = 1
+
 # Chunk duration in seconds, or "auto" to size chunks from available memory.
 # Auto mode targets chunk_memory_fraction of currently available RAM and uses
 # chunk_memory_gb as an optional upper bound (0 = no explicit cap).

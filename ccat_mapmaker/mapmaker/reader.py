@@ -37,7 +37,7 @@ from typing import Iterator, Optional
 
 import numpy as np
 import h5py
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from spt3g import core # type: ignore
 
 from mapmaker import tod
@@ -761,6 +761,9 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
     if isinstance(chunk_duration_s, str) and chunk_duration_s != "auto":
         raise ValueError("pipeline.chunk_duration_s must be seconds or 'auto'")
     pipeline_cfg = cfg["pipeline"]
+    sample_step = pipeline_cfg.get("sample_step", 1)
+    if isinstance(sample_step, bool) or not isinstance(sample_step, int) or sample_step < 1:
+        raise ValueError("pipeline.sample_step must be a positive integer")
     start_offset_s   = cfg["pipeline"].get("start_offset_s", 0.0)
     max_duration_s   = cfg["pipeline"].get("max_duration_s", None)
 
@@ -784,6 +787,7 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
         )
 
     t_obs_start = None
+    selected_samples = 0
     for chunk in chunked_iter:
         if t_obs_start is None:
             t_obs_start = chunk.t_start
@@ -792,4 +796,16 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
             continue
         if max_duration_s is not None and (chunk.t_start - t_obs_start) >= start_offset_s + max_duration_s:
             break
+        if sample_step > 1:
+            offset = (-selected_samples) % sample_step
+            selected_samples += chunk.signal.shape[0]
+            if offset >= chunk.signal.shape[0]:
+                continue
+            sample_slice = slice(offset, None, sample_step)
+            arrays = {}
+            for name in ("signal", "flags", "ra", "dec", "ra_bore", "dec_bore",
+                         "boresight_q", "common_mode"):
+                value = getattr(chunk, name)
+                arrays[name] = value[sample_slice] if value is not None else None
+            chunk = replace(chunk, **arrays, sample_rate=chunk.sample_rate / sample_step)
         yield chunk

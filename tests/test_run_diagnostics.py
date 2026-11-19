@@ -96,6 +96,7 @@ class RunDiagnosticsTests(unittest.TestCase):
             self.assertEqual(metadata["pipeline_clean_steps"], ["gap_fill", "cosmic_rays"])
             self.assertEqual(metadata["active_cleaning_steps"][1]["parameters"]["sigma"], 100)
             self.assertEqual(metadata["resolved_settings"]["pipeline"]["wnf_exclude_sigma"], 0)
+            self.assertEqual(metadata["resolved_settings"]["pipeline"]["sample_step"], 1)
             stats = metadata["pass_processing"]["naive + it_0"]
             self.assertEqual(stats["chunk_samples"], [128])
             self.assertEqual(stats["detector_samples"], 256)
@@ -253,6 +254,11 @@ class RunDiagnosticsTests(unittest.TestCase):
                 self.assertTrue(np.all(chunk.dec > state["dec_edges"][0]))
                 self.assertTrue(np.all(chunk.dec < state["dec_edges"][-1]))
             self.assertEqual(np.sum(result["total_hits"]), 2 * n)
+            cfg["pipeline"]["sample_step"] = 2
+            state = self.runner._mapPrep(cfg)
+            result = self.runner._mapPass(cfg, state, common_mode=False,
+                                          compute_nulls=False)
+            self.assertEqual(np.sum(result["total_hits"]), n)
 
     def test_hdf5_reader_records_input_manifest(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -274,6 +280,79 @@ class RunDiagnosticsTests(unittest.TestCase):
             self.assertEqual(sum(chunk.signal.shape[0] for chunk in chunks), 8)
             self.assertEqual(cfg["_input_files_discovered"], [str(path.resolve())])
             self.assertEqual(cfg["_input_files_opened"], [str(path.resolve())])
+
+    def test_sample_step_tracks_phase_and_aligns_chunk_arrays(self):
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / "scan.h5").touch()
+            cfg = {
+                "data": {"input_dirs": [temp], "file_format": "h5", "format": "simulation"},
+                "pipeline": {"sample_step": 3},
+            }
+
+            def chunks(*args, **kwargs):
+                start = 0
+                for index, length in enumerate((5, 1, 1, 7)):
+                    values = np.arange(start, start + length)
+                    yield self.runner.reader.Chunk(
+                        kids=["a"], signal=values[:, None].astype(float),
+                        flags=values[:, None], ra=values[:, None], dec=values[:, None],
+                        ra_bore=values, dec_bore=values,
+                        boresight_q=np.tile(values[:, None], (1, 4)),
+                        common_mode=values, t_start=float(start),
+                        t_stop=float(start + length), sample_rate=12., chunk_index=index)
+                    start += length
+
+            with mock.patch.object(self.runner.reader, "_iter_h5_simulation_chunks", chunks):
+                result = list(self.runner.reader.iter_chunks(cfg))
+            self.assertEqual([chunk.chunk_index for chunk in result], [0, 2, 3])
+            self.assertEqual([chunk.sample_rate for chunk in result], [4., 4., 4.])
+            expected = np.arange(0, 14, 3)
+            for name in ("signal", "flags", "ra", "dec", "ra_bore", "dec_bore", "common_mode"):
+                actual = np.concatenate([getattr(chunk, name).reshape(-1) for chunk in result])
+                np.testing.assert_array_equal(actual, expected)
+            np.testing.assert_array_equal(
+                np.concatenate([chunk.boresight_q[:, 0] for chunk in result]), expected)
+
+            cfg["pipeline"]["start_offset_s"] = 5
+            with mock.patch.object(self.runner.reader, "_iter_h5_simulation_chunks", chunks):
+                result = list(self.runner.reader.iter_chunks(cfg))
+            np.testing.assert_array_equal(
+                np.concatenate([chunk.signal[:, 0] for chunk in result]), [5, 8, 11])
+
+            for invalid in (0, -1, 1.5, True, "2"):
+                cfg["pipeline"]["sample_step"] = invalid
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                        ValueError, "pipeline.sample_step must be a positive integer"):
+                    list(self.runner.reader.iter_chunks(cfg))
+
+    def test_sample_step_rejects_too_short_first_usable_chunk(self):
+        cfg = {"pipeline": {"sample_step": 4}, "map": {}}
+        chunk = self.runner.reader.Chunk(
+            kids=["a"], signal=np.ones((3, 1)), flags=np.zeros((3, 1), dtype=int),
+            ra=None, dec=None, ra_bore=np.ones(3), dec_bore=np.ones(3),
+            common_mode=None, t_start=0., t_stop=3., sample_rate=1., chunk_index=0)
+        with mock.patch.object(self.runner.reader, "iter_chunks", return_value=iter([chunk])):
+            with self.assertRaisesRegex(ValueError, "increase chunk_duration_s"):
+                self.runner._prepPass(cfg)
+
+    def test_sample_step_applies_to_full_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config, _ = self.make_config(root)
+            config.write_text(config.read_text().replace(
+                "[pipeline]\n", "[pipeline]\nsample_step = 2\n"), encoding="utf-8")
+            with mock.patch.object(sys, "argv", ["run_mapmaker", "--config", str(config)]), \
+                 mock.patch.object(self.runner.reader, "_iter_h5_simulation_chunks", self.fake_chunks), \
+                 mock.patch.object(self.runner.tod, "cleanTod", wraps=self.runner.tod.cleanTod) as clean:
+                self.runner.main()
+            run, = (root / "results").iterdir()
+            metadata = json.loads((run / "metadata.json").read_text())
+            self.assertEqual(metadata["resolved_settings"]["pipeline"]["sample_step"], 2)
+            self.assertEqual(metadata["sample_rate_hz"], 10.)
+            self.assertEqual(metadata["preparation_processing"]["detector_samples"], 192)
+            self.assertEqual(metadata["pass_processing"]["naive + it_0"]["detector_samples"], 128)
+            self.assertTrue(all(call.args[0].shape[0] == 64 and call.args[1] == 10.
+                                for call in clean.call_args_list))
 
     def test_white_noise_exclusion_removes_indices(self):
         result = self.runner.tod.excludedDetectors(

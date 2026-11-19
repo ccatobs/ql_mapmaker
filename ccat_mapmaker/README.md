@@ -38,6 +38,21 @@ Your prompt will change from `(base)` to `(ccat)`. Deactivate when done:
 conda deactivate
 ```
 
+## Tests
+
+From the repository root, run `python -m unittest discover -s tests -v`.
+The sample-backed tests are skipped when their data is unavailable. By default
+they look under `~/notebooks/data/ql_mm_samples/`; set
+`CCAT_MAPMAKER_LAB_SAMPLE_DIR` or `CCAT_MAPMAKER_SIM_SAMPLE_DIR` to the
+corresponding HDF5 directory to override those locations. The lab test also
+requires `spt3g`.
+
+The simulation test uses `Jupiter-0-0.h5` and creates a temporary HDF5 virtual
+view of a 20-second Jupiter crossing, without copying the multi-GB detector
+arrays. It downsamples that window and checks the naive and iterative maps for
+a bright peak near Jupiter. It is a quick integration check, not a validation
+of Jupiter's resolved size, atmospheric modelling, or a full observation.
+
 ## Quick start
 
 ### 1. Point the config at your data

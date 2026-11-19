@@ -414,6 +414,105 @@ class RunDiagnosticsTests(unittest.TestCase):
             self.assertTrue((run / "naive.npy").is_file())
             self.assertTrue(np.isfinite(np.load(run / "naive.npy")).any())
 
+    def test_toast_jupiter_sample_recovers_source(self):
+        sample_dir = Path(os.environ.get(
+            "CCAT_MAPMAKER_SIM_SAMPLE_DIR",
+            Path.home() / "notebooks/data/ql_mm_samples/sim/planet_ATMdata_d3426/"
+            "sim_PCAM280_h5_Jupiter_d3426",
+        ))
+        sample = sample_dir / "Jupiter-0-0.h5"
+        if not sample.is_file():
+            self.skipTest(
+                "Set CCAT_MAPMAKER_SIM_SAMPLE_DIR to the Jupiter sample HDF5 directory"
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "input"
+            source.mkdir()
+            window = source / "jupiter_window.h5"
+            with h5py.File(sample, "r") as original, h5py.File(window, "w") as subset:
+                times = original["shared/times"][:]
+                start = int(np.searchsorted(times, times[0] + 200))
+                stop = int(np.searchsorted(times, times[0] + 220))
+                self.assertGreater(stop, start)
+                original.copy("instrument/focalplane", subset.require_group("instrument"))
+                subset["shared/times"] = times[start:stop]
+                subset["shared/boresight_radec"] = (
+                    original["shared/boresight_radec"][start:stop]
+                )
+                # Read only the crossing window from the original multi-GB arrays.
+                for name in ("signal", "flags"):
+                    dataset = original[f"detdata/{name}"]
+                    layout = h5py.VirtualLayout(
+                        shape=(dataset.shape[0], stop - start), dtype=dataset.dtype)
+                    virtual_source = h5py.VirtualSource(
+                        str(sample.resolve()), dataset.name, shape=dataset.shape)
+                    layout[:, :] = virtual_source[:, start:stop]
+                    subset.create_virtual_dataset(f"detdata/{name}", layout)
+
+            config = root / "settings.toml"
+            config.write_text(
+                "[data]\n"
+                f"input_dirs = [{json.dumps(str(source))}]\n"
+                'file_format = "h5"\n'
+                'format = "simulation"\n'
+                "[map]\n"
+                "ra0_deg = 141.9077477\n"
+                "dec0_deg = 15.6022855\n"
+                "xlen_deg = 1.5\n"
+                "ylen_deg = 1.5\n"
+                "res_arcmin = 0.5\n"
+                "[pipeline]\n"
+                "chunk_duration_s = 10\n"
+                "sample_step = 10\n"
+                "n_iterations = 1\n"
+                "auto_exclude_threshold = 0\n"
+                "wnf_exclude_sigma = 0\n"
+                "weight_cap_factor = 0\n"
+                "compute_time_null = false\n"
+                "compute_detsplit_null = false\n"
+                "[output]\n"
+                f"output_dir = {json.dumps(str(root / 'results'))}\n"
+                'obs_object = "jupiter_sample"\n'
+                "save_png = false\n"
+                "save_numpy = true\n"
+                "save_psd = false\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                    sys, "argv", ["run_mapmaker", "--config", str(config)]):
+                self.runner.main()
+
+            run, = (root / "results").iterdir()
+            metadata = json.loads((run / "metadata.json").read_text())
+            self.assertEqual(metadata["status"], "completed")
+            self.assertEqual(metadata["input_files_opened"], [str(window.resolve())])
+            self.assertEqual(metadata["resolved_settings"]["pipeline"]["sample_step"], 10)
+            self.assertEqual(
+                sum(metadata["preparation_processing"]["chunk_samples"]),
+                (stop - start + 9) // 10,
+            )
+            self.assertGreater(metadata["map_quality"]["covered_pixels"], 0)
+
+            ra_edges = np.load(run / "ra_edges.npy")
+            dec_edges = np.load(run / "dec_edges.npy")
+            hits = np.load(run / "hits.npy")
+            for name in ("naive", "it_1"):
+                with self.subTest(map=name):
+                    image = np.load(run / f"{name}.npy")
+                    y, x = np.unravel_index(np.nanargmax(image), image.shape)
+                    peak_ra = (ra_edges[x] + ra_edges[x + 1]) / 2
+                    peak_dec = (dec_edges[y] + dec_edges[y + 1]) / 2
+                    distance_deg = np.hypot(
+                        (peak_ra - 141.9077477) * np.cos(np.deg2rad(15.6022855)),
+                        peak_dec - 15.6022855,
+                    )
+                    self.assertLess(distance_deg, 1 / 60)
+                    self.assertGreater(hits[y, x], 0)
+                    self.assertGreater(image[y, x], 10 * np.nanpercentile(np.abs(image), 99))
+
     def test_white_noise_exclusion_removes_indices(self):
         result = self.runner.tod.excludedDetectors(
             ["a", "b", "c"], np.ones(3), np.array([1., 1., 100.]),

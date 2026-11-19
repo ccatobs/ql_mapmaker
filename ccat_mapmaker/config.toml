@@ -9,11 +9,19 @@
 # ============================================================================ #
 
 # Quick setup:
-# 1. Modify the 'data' section for your input dir and file formats.
-# 2. Detector layout?
-# 3. Modify 'map' section if you want to specify map extent, center, or resolution. Extent and center can be automatically determined from data, but resolution cannot. Higher resolution takes more time.
-# The rest of the sections are configured by default for a balance between speed and accuracy. Feel free to read through them and modify to your needs.
- 
+# 1. Set data.input_dirs to one or more directories or glob patterns containing
+#    the input files. Paths are resolved relative to this configuration file
+#    when they are not absolute.
+# 2. Set data.file_format to the on-disk file type and data.format to the
+#    organization of the data inside those files.
+# 3. Optionally set a map target or explicit map center and extents. If the
+#    center and an extent are omitted, the mapmaker derives them from pointing.
+# 4. Review the pipeline and output settings before a long production run.
+#
+# The configuration is intentionally conservative about data handling: it
+# keeps every sample, uses automatic memory-aware chunking, enables iterative
+# common-mode subtraction, and writes NumPy plus PSD diagnostic products.
+
 
 
 
@@ -23,19 +31,22 @@
 [data]
 
 
-# Input directories. (list)
-# Will merge all data in these directories into one map.
+# Input directories or glob patterns. (list of strings)
+# Every matching file is combined into one observation/map. Patterns are
+# expanded recursively and only files matching data.file_format are opened.
+input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/planet_ATMdata_d3426/sim_PCAM280_h5_Jupiter_d3426"]
 # input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/lab/sample_h5"]
 # input_dirs = ["/Users/james/notebooks/data/ql_mm_samples/lab/sample_h5"]
-input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/planet_ATMdata_d3426/sim_PCAM280_h5_Jupiter_d3426"]
 
-# File format. (string)
-# Options: "g3", "h5".
+# On-disk file extension/type. (string)
+# Supported values are "g3" and "h5". This selects which files are discovered;
+# it does not determine how their contents are interpreted.
 file_format = "h5"
 
-# Data organization format. (string)
-# Options: "simulation", "lab".
-format = "simulation" 
+# Data organization inside the files. (string)
+# "simulation" reads TOAST-style simulation data. "lab" reads the real-data
+# organization and applies the corresponding signal conversion path.
+format = "simulation"
 
 
 
@@ -46,25 +57,41 @@ format = "simulation"
 [map]
 
 
-# Map centre in celestial coordinates (degrees).
-# Priority: ra0_deg/dec0_deg (if both set) > target > auto (mean boresight).
-# ra0_deg  = 229.663
-# dec0_deg = -56.649
-# 229.663, -56.649: RCW 92's SIMBAD J2000 position (15h18m39.1s, -56d38'49")
+# Map center in celestial coordinates (degrees).
+# The priority is:
+#   1. ra0_deg and dec0_deg together, when both are present;
+#   2. target, resolved at the observation start time;
+#   3. the mean usable boresight pointing from the input data.
+#ra0_deg  = 229.663
+#dec0_deg = -56.649
+# The commented example above is an explicit fixed center; uncomment both
+# values together if a fixed center is required.
 
-# Alternative to manual ra0_deg/dec0_deg: resolve the centre from a name. Ignored while ra0_deg/dec0_deg above are both set, comment those out to use this.
-# - Solar-system bodies ("jupiter", "saturn", "moon", "sun", ...) move, so they're looked up via ephemeris at the observation's start time from an observer site so FYST for simulation, or the gondola's own lat/lon/alt telemetry for real BLAST-TNG data (a balloon flight has no fixed site). Useful since planets are used as calibration sources.
-# - Anything else is resolved by name via SkyCoord.from_name (SIMBAD, requires network access).
+# Alternative to explicit coordinates: resolve the center from a name. This is
+# ignored while both ra0_deg and dec0_deg are set.
+# Solar-system bodies such as "jupiter", "saturn", "moon", and "sun" are
+# resolved with an ephemeris at the observation start time. The default site
+# is FYST; a supported telemetry-derived site can be selected with site.
+# Other names are resolved through SkyCoord.from_name and require network
+# access to SIMBAD.
+#target = "jupiter"
+#site = "fyst"
 
-# Map extent. Omit xlen_deg and/or ylen_deg to size that axis automatically from
-# retained detector pointing (each axis is independent).
-# xlen_deg   = 2.5 # deg
-# ylen_deg   = 1.3 # deg
+# Map extent in degrees. Each axis is independent: omit xlen_deg and/or
+# ylen_deg to size that axis automatically from finite, usable pointing for
+# retained detectors over the selected time window. Automatic sizing includes
+# a one-pixel margin. An automatic extent cannot be computed without usable
+# pointing.
+#xlen_deg   = 2.5 # deg
+#ylen_deg   = 1.3 # deg
 
-# Map pixel size
-res_arcmin = 0.25 # arcmin
+# Map pixel size in arcminutes. This is the one map-size setting that must be
+# provided; smaller pixels increase memory use and runtime.
+res_arcmin = 0.25
 
-# If true, run an extra boresight-only naive pass and save a side-by-side comparison plot showing the effect of applying focal plane offsets.
+# If true, run an additional boresight-only naive pass and save a comparison
+# plot against the normal pass. This is useful for checking the effect of
+# applying detector focal-plane pointing offsets.
 compare_boresight = false
 
 
@@ -72,139 +99,159 @@ compare_boresight = false
 
 # ============================================================================ #
 # PIPELINE
-# Pipeline settings including data handling, cleaning, detector exclusions, weighting, and diagnostics.
+# Pipeline settings for time selection, chunking, cleaning, detector
+# exclusion, map weighting, and diagnostic products.
 [pipeline]
 
 
 # ---------------------------------------------------------------- #
 #   Chunking & time window
 
-# Time window: skip start_offset_s seconds, then process max_duration_s seconds.
-# Comment out max_duration_s to process the full observation.
-# Reverted to the full file -- the reference profiling/mapmaker.py script
-# runs roach1_pass3.g3 whole, no time-windowing, and relies on a wide enough
-# map (see [map] xlen_deg/ylen_deg) rather than hunting for a specific slice.
+# Time window: skip start_offset_s seconds, then process at most
+# max_duration_s seconds. Comment out max_duration_s to process the complete
+# observation. Limits are applied at chunk boundaries.
 start_offset_s = 0
-#max_duration_s = 0
+#max_duration_s = 60
 
-# Retain every Nth time sample from all detectors (1 uses every sample).
-# Larger values speed up processing but reduce time resolution.
+# Retain every Nth time sample from every detector. The first retained sample
+# is the first sample in the selected window, and the stride continues across
+# chunks and files. Values greater than 1 reduce runtime and effective sample
+# rate, but can alias signals and change cleaning/noise estimates.
 sample_step = 1
 
-# Chunk duration in seconds, or "auto" to size chunks from available memory.
-# Auto mode targets chunk_memory_fraction of currently available RAM and uses
-# chunk_memory_gb as an optional upper bound (0 = no explicit cap).
+# Processing chunk duration in seconds, or "auto" for memory-aware sizing.
+# Auto mode targets chunk_memory_fraction of currently available RAM and
+# applies chunk_memory_gb as an optional upper bound. The estimate is a target,
+# not a hard process-memory limit; input readers may materialize additional
+# data.
 chunk_duration_s = "auto"
-chunk_memory_fraction = 0.5 # of currently available
-chunk_memory_gb = 0.0
-
-# Legacy setting; not currently consumed. Use chunk_duration_s = "auto" and
-# chunk_memory_* to size processing chunks from available memory.
-time_chunk_size = 0
+chunk_memory_fraction = 0.5
+chunk_memory_gb = 0.0 # 0 means no explicit GiB cap
 
 
 # ---------------------------------------------------------------- #
-#   Common-mode & cleaning
+#   Common-mode subtraction and cleaning
 
-# Common-mode subtraction iterations after the naive map.
-# 0 = naive map only, 3-5 = good balance of quality vs runtime.
+# Number of iterative common-mode subtraction passes after the naive map.
+# Zero produces only the naive map. Values around 3-5 are a typical quality/
+# runtime compromise. Gap filling always runs; the optional cleaning blocks
+# below are enabled by including their table and run in the fixed order
+# cosmic_rays, highpass, then notch.
 n_iterations = 3
 
 
 # ---------------------------------------------------------------- #
 #   Detector exclusion
 
-# Std away from all detectors median.
-# Set to 0 to disable auto-exclusion.
-auto_exclude_threshold = 0 
+# Exclude detectors whose time-domain noise is more than this many standard
+# deviations from the detector-median noise level. Set to 0 to disable this
+# automatic exclusion.
+auto_exclude_threshold = 0
 
-#exclude_detectors = ["roach1_0011", "roach1_0127"]
+# Optional manual exclusions by detector name or zero-based detector index.
+# These are applied in addition to the automatic exclusion rules.
+#exclude_detectors = ["detector_a", "detector_b"]
 #exclude_detector_indices = [1, 2]
 
-# Additional automatic exclusion based on each detector's white-noise-floor 
-# median PSD in a 0.4-0.9x Nyquist band. 
-# Cutoff is log-median + N*sigma of log10(white_noise_floor).
-# Set to 0 to disable.
+# Additional automatic exclusion based on each detector's median white-noise
+# floor in the 0.4-0.9x Nyquist band. The cutoff is the log-space median plus
+# wnf_exclude_sigma standard deviations. Set to 0 to disable.
 wnf_exclude_sigma = 3.0
 
 
 # ---------------------------------------------------------------- #
 #   Map weighting
 
-# Per-detector map weight = 1/white_noise_floor (inverse-variance), using the
-# same whole-observation estimate as wnf_exclude_sigma above -- quieter
-# detectors count for more in the combined map. Capped at weight_cap_factor x
-# the median weight so one anomalously-quiet detector can't dominate the map;
-# detectors with no usable white_noise_floor estimate fall back to the
-# median weight. Set to 0 to disable (uniform weighting, every detector
-# counts equally).
+# Per-detector map weight is inverse white-noise floor. The estimate is made
+# over the observation, so quieter detectors contribute more to the combined
+# map. Each weight is capped at weight_cap_factor times the median weight;
+# invalid estimates fall back to the median. Set to 0 for uniform weighting.
 weight_cap_factor = 5.0
 
 
 # ---------------------------------------------------------------- #
 #   Diagnostics
 
-# Final-pass null maps, independently enabled. These are diagnostics, not
-# independent reconstructions: both halves share common-mode and sky estimates.
-# - compute_time_null: even/odd chunk-parity half-difference, reusing main binning.
-# - compute_detsplit_null: balanced random detector halves; costs two extra
-#   binChunk calls per chunk on the final pass.
+# Final-pass null maps. These are diagnostics, not independent reconstructions:
+# both halves share the common-mode estimate and previous full-sky map.
+# compute_time_null creates an even/odd chunk-parity half-difference.
+# compute_detsplit_null creates a balanced random detector-half difference and
+# requires at least two retained detectors. Null products add final-pass work.
 compute_time_null     = true
 compute_detsplit_null = true
 
 
 # ---------------------------------------------------------------- #
-#   Cosmic rays
+#   Cosmic-ray cleaning
 [pipeline.cosmic_rays]
-sigma = 3.5 # Spike threshold, in units of sigma*std(tod).
-n = 2 # Samples masked on each side of a detected spike.
-max_width = 5 # Max spike width to be considered cosmic ray.
+# Presence of this table enables cosmic-ray cleaning. sigma is the spike
+# threshold in units of sigma times the detector timestream standard deviation.
+# n is the number of samples padded on each side of a detected spike.
+# max_width is the maximum detected spike width accepted as a cosmic ray.
+sigma = 3.5
+n = 2
+max_width = 5
 
 
 # ---------------------------------------------------------------- #
-#   Highpass
-# [pipeline.highpass]
-# cutoff_hz = 0.0
+#   High-pass cleaning (disabled unless the table is uncommented)
+#[pipeline.highpass]
+# cutoff_hz is the high-pass cutoff. A value of 0.0 disables filtering when
+# the block is enabled; this is generally unsuitable for atmospheric drift
+# removal unless chosen for the data.
+#cutoff_hz = 0.0
 
 
 # ---------------------------------------------------------------- #
-#   Notch
-# [pipeline.notch]
-# freq_hz      = 60.0 # 50.0 at FYST
-# n_harmonics  = 5 # includes the fundamental as harmonic 1
-# bandwidth_hz = 1.0 # width of each notch
+#   Notch cleaning (disabled unless the table is uncommented)
+#[pipeline.notch]
+#freq_hz      = 60.0 # Use 50.0 for a 50 Hz mains environment.
+#n_harmonics  = 5    # Includes the fundamental as harmonic 1.
+#bandwidth_hz = 1.0  # Width of each removed notch in Hz.
 
 
 
 
 # ============================================================================ #
 # OUTPUT
-# Output options including directory, naming, and output products.
+# Output directory, naming, and product-selection settings.
 [output]
 
-
+# Relative output paths are resolved relative to this configuration file.
 output_dir = "output"
-obs_object = "qlmm" # affects dir name and similar
+# Label used in output directory names and related provenance.
+obs_object = "qlmm"
+# Save numerical maps, weights, diagnostics, and metadata arrays.
 save_numpy = true
-save_png   = false
-# PSD diagnostic plots are saved independently of save_png. When save_numpy
-# is true, the underlying spectra and detector noise floors are also saved.
-save_psd   = true
+# Save overview/map PNG images. This does not control PSD diagnostics.
+save_png = true
+# Save PSD diagnostic plots independently of save_png. When save_numpy is also
+# true, the underlying spectra and detector noise-floor arrays are saved too.
+save_psd = true
 
 
 # ---------------------------------------------------------------- #
-# per_detector
+# Per-detector diagnostic maps
 [per_detector]
-# Per-detector maps for pointing model reconstruction.
-# Each detector gets its own map; peak RA/Dec centroid saved to centroids.json.
-enabled         = false
-save_png        = false
-save_numpy      = true
+# When enabled, create one diagnostic map per selected detector. Peak
+# coordinates are written to centroids.json regardless of image/NumPy output
+# settings. This is primarily for pointing-model reconstruction.
+enabled = false
+# Save each per-detector map as a PNG.
+save_png = false
+# Save each per-detector map as a NumPy array.
+save_numpy = true
+# Flag detectors whose off-source RMS exceeds this multiple of the median RMS.
 noise_threshold = 3.0 # flag detectors with off-source RMS > threshold * median RMS
 
-apply_offsets   = false # false = bin against shared boresight ra_bore/dec_bore, no per-detector offset applied (offsets not known/trusted yet) centroids.json then records where the boresight was pointing at each detector's peak,
+# If true, bin each detector using its focal-plane offset pointing. If false,
+# bin all detectors against the shared boresight. The latter is useful while
+# detector offsets are not trusted; centroids then describe boresight locations.
+apply_offsets   = false
 
-# Detector selection -- choose ONE of the following:
-max_detectors = 0 # 0 = all; N = evenly sample N detectors
-#detectors = ["PC_f280_A_001"] # specific detectors by name
-#detector_indices = [0, 5, 100] # specific detectors by index=
+# Choose at most one detector-selection method. max_detectors = 0 selects all
+# detectors; a positive value evenly samples that many detectors. Explicit
+# names or zero-based indices select exactly those detectors.
+max_detectors = 0
+#detectors = ["PC_f280_A_001"]
+#detector_indices = [0, 5, 100]

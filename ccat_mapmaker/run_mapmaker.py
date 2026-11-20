@@ -456,6 +456,7 @@ def _prepPass(cfg: dict):
             ra_sum = dec_sum = n_bore = n_chunks = psd_count = 0
 
             det_median_sum = np.zeros(n_dets)
+            det_median_count = np.zeros(n_dets, dtype=int)
             det_diff_sum = np.zeros(n_dets)
             det_diff_sum_sq = np.zeros(n_dets)
             det_diff_count = np.zeros(n_dets, dtype=int)
@@ -469,6 +470,7 @@ def _prepPass(cfg: dict):
             freqs = np.fft.rfftfreq(nominal_chunk_len, d=1.0/sample_rate)
 
             psd_sum = None # will be initialized in Sxx section
+            psd_detector_counts = np.zeros(n_dets, dtype=int)
 
             init = True
         # ------------------------------------------------------ #
@@ -508,8 +510,13 @@ def _prepPass(cfg: dict):
         # We are using a strided median to reduce computation.
         # Dynamically determines stride size for statistical robustness.
         # det_median = np.nanmedian(chunk.signal[::4, :], axis=0)
-        det_median = _stridedMedian(chunk.signal, axis=0)
-        det_median_sum  += det_median
+        det_median = np.full(n_dets, np.nan)
+        present = np.any(np.isfinite(chunk.signal), axis=0)
+        if np.any(present):
+            det_median[present] = _stridedMedian(chunk.signal[:, present], axis=0)
+        finite_median = np.isfinite(det_median)
+        det_median_sum[finite_median] += det_median[finite_median]
+        det_median_count += finite_median
 
         # Sxx, adding per loop.
         # The Welch is the second bottle neck (t=0.16 s).
@@ -522,7 +529,9 @@ def _prepPass(cfg: dict):
             if psd_sum is None:
                 psd_sum = np.zeros_like(p)
                 psd_freqs = freqs
-            psd_sum += p
+            finite_spectra = np.all(np.isfinite(p), axis=0)
+            psd_sum[:, finite_spectra] += p[:, finite_spectra]
+            psd_detector_counts += finite_spectra
             psd_count += 1
 
         # stop time is from last chunk
@@ -543,7 +552,11 @@ def _prepPass(cfg: dict):
         det_diff_sum, det_diff_sum_sq, det_diff_count)/np.sqrt(2)
 
     # Average Sxx across chunks
-    psd_avg = psd_sum/psd_count if psd_count>0 else None
+    psd_avg = (
+        np.divide(psd_sum, psd_detector_counts[np.newaxis, :],
+                  out=np.full_like(psd_sum, np.nan),
+                  where=psd_detector_counts[np.newaxis, :] > 0)
+        if psd_count > 0 else None)
     stats.update({
         "psd_chunk_samples": nominal_chunk_len,
         "psd_chunks_used": psd_count,
@@ -560,6 +573,10 @@ def _prepPass(cfg: dict):
             stats["psd_time_samples_used"], stats["psd_eligible_time_samples"], nominal_chunk_len)
     if stats["input_flagged_samples"]:
         LOGGER.warning("Weighting PSD does not mask input flags; flagged samples may affect detector weights")
+    if psd_count and np.any(psd_detector_counts < psd_count):
+        LOGGER.warning(
+            "Skipped non-finite weighting PSD segments for %d detectors",
+            np.count_nonzero(psd_detector_counts < psd_count))
     if stats["psd_nonfinite_detectors"]:
         LOGGER.warning("Weighting PSD is non-finite for %d detectors", stats["psd_nonfinite_detectors"])
 
@@ -567,10 +584,16 @@ def _prepPass(cfg: dict):
     white_noise_floor = tod.findWhiteNoiseFloor(
         psd_avg, psd_freqs, sample_rate)
 
+    det_offsets = np.divide(
+        det_median_sum, det_median_count, out=np.full(n_dets, np.nan),
+        where=det_median_count > 0)
+    if np.any(det_median_count == 0):
+        LOGGER.warning("No finite signal median for %d detectors", np.count_nonzero(det_median_count == 0))
+
     state = {
         "ra0_auto": ra_sum/n_bore, 
         "dec0_auto": dec_sum/n_bore, 
-        "det_offsets": det_median_sum/n_chunks, 
+        "det_offsets": det_offsets,
         "det_noise": det_noise, 
         "all_kids": kids, 
         "obs_info": obs_info, 
@@ -808,7 +831,7 @@ def _mapPass(
 # _per_detector_pass
 def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
                        ra_edges: np.ndarray, dec_edges: np.ndarray,
-                       det_offsets: np.ndarray):
+                       det_offsets: np.ndarray, det_noise: np.ndarray):
     ny = len(dec_edges) - 1
     nx = len(ra_edges) - 1
 
@@ -818,6 +841,8 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
 
     for chunk in reader.iter_chunks(cfg, apply_offsets=apply_offsets):
         if kids_sel is None:
+            if apply_offsets and chunk.ra is None:
+                LOGGER.warning("Detector pointing offsets are unavailable; per-detector maps use boresight pointing")
             kids_sel, sel_idx = _resolve_det_selection(chunk.kids, pd_cfg)
             n_sel = len(kids_sel)
             det_data = np.zeros((n_sel, ny, nx), dtype=np.float32)
@@ -828,19 +853,12 @@ def _per_detector_pass(cfg: dict, pipe_cfg: dict, pd_cfg: dict,
         flag_mask[flags != 0] = np.nan
         sig = chunk.signal - det_offsets[np.newaxis, :]
 
-        sig, new_flags = tod.clean_tod(
-            sig, flag_mask, chunk.sample_rate, 
-            steps=pipe_cfg.get("clean_steps", []), 
-            step_params={
-                "cosmic_rays": pipe_cfg.get("cosmic_rays", {}),
-                "highpass": pipe_cfg.get("highpass", {}),
-                "notch": pipe_cfg.get("notch", {}),
-            })
+        sig, new_flags = tod.cleanTod(sig, chunk.sample_rate, det_noise, steps=pipe_cfg)
 
         bin_flag_mask = np.where(new_flags != 0, np.nan, flag_mask)
 
         for j, i in enumerate(sel_idx):
-            if apply_offsets:
+            if apply_offsets and chunk.ra is not None:
                 ra, dec = chunk.ra[:, i], chunk.dec[:, i]
             else:
                 ra, dec = chunk.ra_bore, chunk.dec_bore
@@ -1350,7 +1368,7 @@ def step_6_per_detector_maps(cfg: dict, step1_res: dict, pd_results: tuple | Non
             t = time.perf_counter()
             kids_sel, det_data, det_hits = _per_detector_pass(
                 cfg, pipe_cfg, pd_cfg, step1_res["ra_edges"],
-                step1_res["dec_edges"], step1_res["det_offsets"]
+                step1_res["dec_edges"], step1_res["det_offsets"], step1_res["det_noise"]
             )
             print(f"  Pass complete [{time.perf_counter() - t:.1f}s]")
 
@@ -1458,7 +1476,7 @@ def main():
         # Precalculate chunk size
         LOGGER.info("Precalculating total chunks where supported")
         step_start = time.perf_counter()
-        cfgs |= reader._precalcChunkTotal(cfgs) # if possible ("lab" only right now)
+        cfgs |= reader._precalcChunkTotal(cfgs)
         LOGGER.info(
             "Chunk-count preparation complete in %.1f s; total_chunks=%s",
             time.perf_counter() - step_start, cfgs.get("total_chunks", "unknown"),

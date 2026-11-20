@@ -9,6 +9,10 @@ from unittest import mock
 
 import h5py
 import numpy as np
+from astropy.coordinates import AltAz, SkyCoord
+from astropy.time import Time
+from astropy.utils import iers
+import astropy.units as u
 
 
 class LabReaderTests(unittest.TestCase):
@@ -26,6 +30,10 @@ class LabReaderTests(unittest.TestCase):
             cls.spt_patch = mock.patch.dict(sys.modules, {"spt3g": stub})
             cls.spt_patch.start()
         cls.reader = importlib.import_module("mapmaker.reader")
+        cls.iers_download = iers.conf.set_temp("auto_download", False)
+        cls.iers_download.__enter__()
+        cls.iers_age = iers.conf.set_temp("auto_max_age", None)
+        cls.iers_age.__enter__()
         cls.units_patch = None
         if not hasattr(cls.reader.core, "G3Units"):
             cls.units_patch = mock.patch.object(
@@ -34,6 +42,8 @@ class LabReaderTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        cls.iers_age.__exit__(None, None, None)
+        cls.iers_download.__exit__(None, None, None)
         if cls.units_patch:
             cls.units_patch.stop()
         if cls.spt_patch:
@@ -41,6 +51,11 @@ class LabReaderTests(unittest.TestCase):
         cls.path_patch.stop()
 
     def write_block(self, f, block, *, comb=True):
+        if "hk" not in f:
+            hk = f.create_group("hk/frames/0/blocks/0")
+            hk["times"] = np.arange(-1, 8, dtype=np.int64) * 100000000
+            hk["Azimuth_current_position"] = np.full(9, 20.)
+            hk["Elevation_current_position"] = np.full(9, 21.)
         frame = f.create_group(f"timestream/{block}/frames/1")
         frame.attrs["frame_type"] = "Scan"
         data = frame.create_group("data")
@@ -59,7 +74,8 @@ class LabReaderTests(unittest.TestCase):
                 data=np.array([101.25, 203.]))
 
     def read_frame(self, path):
-        return next(self.reader._iter_h5_lab_frames([path]))
+        return next(self.reader._iter_h5_lab_chunks(
+            [path], 0, self.reader.coord.FYST_SITE))
 
     def test_pairs_by_name_uses_probe_comb_and_qualifies_detectors(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -129,17 +145,118 @@ class LabReaderTests(unittest.TestCase):
             frequency, f_tone=101.75)
         np.testing.assert_allclose(result, [0., 0.25 / 101.75])
 
+    def test_filtering_handles_bounded_gaps_and_rejects_unfillable_gaps(self):
+        samples = np.tile(np.sin(np.arange(32.) / 4)[:, None], (1, 2))
+        samples[10, 0] = np.nan
+        filtered, flags = self.reader.tod.cleanTod(
+            samples, 16., np.zeros(2), {"highpass": {"cutoff_hz": .5}})
+        self.assertTrue(np.all(np.isfinite(filtered)))
+        self.assertEqual(flags[10, 0], self.reader.tod.GAP_FLAG)
+        samples[0, 0] = np.nan
+        with self.assertRaisesRegex(ValueError, "unfillable gap"):
+            self.reader.tod.cleanTod(
+                samples, 16., np.zeros(2), {"highpass": {"cutoff_hz": .5}})
+
     def test_rejects_changed_detector_list_between_frames(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "lab.h5"
             with h5py.File(path, "w") as f:
                 self.write_block(f, "B1D1")
-                self.write_block(f, "B1D2")
                 f.copy("timestream/B1D1/frames/1", "timestream/B1D1/frames/2")
-            frames = self.reader._iter_h5_lab_frames([path])
-            next(frames)
-            with self.assertRaisesRegex(ValueError, "detector list changed"):
-                next(frames)
+                f["timestream/B1D1/frames/2/data/names"][0] = b"r0002_Q"
+            with self.assertRaisesRegex(ValueError, "IQ channel names changed"):
+                self.read_frame(path)
+
+    def test_alignment_crosses_frame_boundaries_and_flags_gaps(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "lab.h5"
+            with h5py.File(path, "w") as f:
+                self.write_block(f, "B1D1")
+                self.write_block(f, "B1D2")
+                for block, frames in (
+                    ("B1D1", [(1, [0, 1, 2, 3]), (2, [4, 5, 6])]),
+                    ("B1D2", [(1, [.5, 1.5]), (2, [2.5, 4.5, 5.5, 6.5])]),
+                ):
+                    f.copy(f"timestream/{block}/frames/1",
+                           f"timestream/{block}/frames/2")
+                    for frame_no, seconds in frames:
+                        group = f[f"timestream/{block}/frames/{frame_no}/data"]
+                        del group["data"]
+                        del group["times"]
+                        times = np.asarray(seconds)
+                        group["times"] = (times * 100000000).astype(np.int64)
+                        group["data"] = np.array([
+                            np.zeros(len(times)), 1.5 + .2 * times,
+                            np.full(len(times), 6.), np.zeros(len(times))])
+            chunks = list(self.reader._iter_h5_lab_chunks(
+                [path], 2., self.reader.coord.FYST_SITE))
+            self.assertEqual([len(c.signal) for c in chunks], [2, 2, 2])
+            self.assertAlmostEqual(chunks[0].t_start, .5)
+            self.assertAlmostEqual(chunks[-1].t_stop, 6.5)
+            sig = np.concatenate([c.signal for c in chunks])
+            flags = np.concatenate([c.flags for c in chunks])
+            expected = .1 * np.arange(.5, 6., 1.) / 101.25
+            np.testing.assert_allclose(sig[:, 0], expected)
+            np.testing.assert_allclose(sig[[0, 1, 2, 4, 5], 2], expected[[0, 1, 2, 4, 5]])
+            self.assertTrue(np.isnan(sig[3, 2]))
+            self.assertTrue(np.all(flags[3, 2:] == self.reader.tod.GAP_FLAG))
+            self.assertFalse(flags[:, :2].any())
+
+    def test_pointing_is_interpolated_and_transformed_to_icrs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "lab.h5"
+            with h5py.File(path, "w") as f:
+                self.write_block(f, "B1D1")
+                hk = f["hk/frames/0/blocks/0"]
+                hk["Azimuth_current_position"][:] = [359., 359., 1., 1., 1., 1., 1., 1., 1.]
+                f["timestream/B1D1/frames/1/data/times"][:] = [0, 50000000, 100000000]
+            chunk = self.read_frame(path)
+            expected = SkyCoord(
+                az=np.array([359., 0., 1.]) * u.deg,
+                alt=np.full(3, 21.) * u.deg,
+                frame=AltAz(obstime=Time([0., .5, 1.], format="unix", scale="utc"),
+                            location=self.reader.coord.FYST_SITE, pressure=0 * u.hPa),
+            ).icrs
+            np.testing.assert_allclose(chunk.ra_bore, expected.ra.deg, atol=1e-10)
+            np.testing.assert_allclose(chunk.dec_bore, expected.dec.deg, atol=1e-10)
+
+    def test_rejects_missing_or_gapped_pointing(self):
+        for defect in ("missing", "gap"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / "lab.h5"
+                with h5py.File(path, "w") as f:
+                    self.write_block(f, "B1D1")
+                    if defect == "missing":
+                        del f["hk"]
+                    else:
+                        hk = f["hk/frames/0/blocks/0"]
+                        del hk["times"]
+                        del hk["Azimuth_current_position"]
+                        del hk["Elevation_current_position"]
+                        hk["times"] = np.array([-1, 0, 3, 4], dtype=np.int64) * 100000000
+                        hk["Azimuth_current_position"] = np.full(4, 20.)
+                        hk["Elevation_current_position"] = np.full(4, 21.)
+                with self.assertRaisesRegex(ValueError, "housekeeping"):
+                    self.read_frame(path)
+
+    def test_lab_requires_explicit_site(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "lab.h5"
+            with h5py.File(path, "w") as f:
+                self.write_block(f, "B1D1")
+            cfg = {"data": {"input_dirs": [temp], "file_format": "h5", "format": "lab"},
+                   "pipeline": {"chunk_duration_s": 1.}, "map": {}}
+            with self.assertRaisesRegex(ValueError, "explicit map.site"):
+                next(self.reader.iter_chunks(cfg))
+
+    def test_explicit_site_coordinates_are_used(self):
+        cfg = {"map": {"site_lat_deg": 42., "site_lon_deg": -71., "site_height_m": 100.}}
+        site = self.reader.coord.resolveSite(cfg)
+        self.assertAlmostEqual(site.lat.deg, 42.)
+        self.assertAlmostEqual(site.lon.deg, -71.)
+        self.assertAlmostEqual(site.height.to_value(u.m), 100.)
+        with self.assertRaisesRegex(ValueError, "all three"):
+            self.reader.coord.resolveSite({"map": {"site_lat_deg": 42.}})
 
     def test_sample_first_frame_is_converted(self):
         sample_dir = Path(os.environ.get(
@@ -154,18 +271,24 @@ class LabReaderTests(unittest.TestCase):
         self.assertEqual(chunk.signal.shape[1], 8000)
         self.assertTrue(np.all(np.isfinite(chunk.signal)))
         self.assertEqual(chunk.kids[:2], ["B1D1:r0000", "B1D1:r0001"])
+        self.assertTrue(np.all((chunk.ra_bore >= 0) & (chunk.ra_bore < 360)))
+        self.assertTrue(np.all((chunk.dec_bore >= -90) & (chunk.dec_bore <= 90)))
         with h5py.File(paths[0], "r") as f:
-            frame = f["timestream/B1D1/frames/1/data/data"]
+            origin = max(int(f[f"timestream/{block}/frames/1/data/times"][0])
+                         for block in f["timestream"])
+            data = f["timestream/B1D1/frames/1/data"]
+            times = data["times"][:] - origin
+            right = np.searchsorted(times, 0)
             sweep = next(iter(f["targ/B1D1"].values()))
-            tone = next(
-                ds[0] for name, ds in f["config/B1D1/combs"].items()
-                if "tstream_freq_comb" in name)
             calibration = sweep[:, :sweep.shape[1] // 500]
-            expected, _ = self.reader.tod.iq_to_df_hybrid(
-                frame[0, :chunk.signal.shape[0]], frame[1, :chunk.signal.shape[0]],
+            tone = next(ds[0] for name, ds in f["config/B1D1/combs"].items()
+                        if "tstream_freq_comb" in name)
+            native, _ = self.reader.tod.iq_to_df_hybrid(
+                data["data"][0, right-1:right+1], data["data"][1, right-1:right+1],
                 calibration[1].real, calibration[1].imag, calibration[0].real,
                 f_tone=tone)
-        np.testing.assert_allclose(chunk.signal[:, 0], expected)
+            expected = np.interp(0, times[right-1:right+1], native)
+        self.assertAlmostEqual(chunk.signal[0, 0], expected, places=14)
 
 
 if __name__ == "__main__":

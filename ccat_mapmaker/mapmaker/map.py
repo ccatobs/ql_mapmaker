@@ -91,13 +91,12 @@ def bin_detector(tod_1d: np.ndarray, flag_mask_1d: np.ndarray,
     per pixel (data), once without to get sample count per pixel (hits).
     Dividing data by hits gives the average signal per pixel.
     """
-    flags = np.copy(flag_mask_1d)
-    flags[np.isnan(flags)] = 0
-    data, _, _ = np.histogram2d(dec_1d, ra_1d,
-                                bins=[dec_edges, ra_edges],
-                                weights=tod_1d*flags)
-    hits, _, _ = np.histogram2d(dec_1d[np.isnan(flag_mask_1d) == False], ra_1d[np.isnan(flag_mask_1d) == False],
-                                bins=[dec_edges, ra_edges])
+    valid = ~np.isnan(flag_mask_1d)
+    data, _, _ = np.histogram2d(
+        dec_1d[valid], ra_1d[valid], bins=[dec_edges, ra_edges],
+        weights=tod_1d[valid] * flag_mask_1d[valid])
+    hits, _, _ = np.histogram2d(
+        dec_1d[valid], ra_1d[valid], bins=[dec_edges, ra_edges])
     return data.astype(dtype), hits.astype(dtype)
 
 

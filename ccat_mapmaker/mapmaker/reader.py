@@ -61,7 +61,7 @@ class Chunk:
     All 2-D arrays are time-first: shape (n_samps, n_dets).
 
     kids[j] is the name of the detector in column j of signal, ra, dec.
-    t_start / t_stop are in seconds since the G3 epoch (Jan 1 2001).
+    t_start / t_stop are Unix seconds.
     common_mode starts as None; populated downstream if needed.
 
     flags is a per-(sample, detector) bitmask: 0 = good, nonzero = flagged.
@@ -351,234 +351,215 @@ def _load_lab_calibration(f: h5py.File, block: str, n_dets: int):
     return frequencies, iq, tones
 
 
-# ============================================================================ #
-# _iter_h5_lab_frames
-def _iter_h5_lab_frames(files: list, apply_offsets: bool = True) -> Iterator[Chunk]:
-    """Yield one frame-level Chunk per scan frame from HDF5 lab files."""
+_LAB_TICKS_PER_SECOND = 100_000_000
+_LAB_GAP_FACTOR = 1.5
 
-    sample_rate_ref = [None]
-    expected_kids = None
 
-    for path in files:
-        with h5py.File(path, 'r') as f:
-            calibrations = {}
-            block_names = {}
-            if "timestream" not in f:
+@dataclass
+class _LabStream:
+    block: str
+    pairs: list
+    calibration: tuple
+    times: np.ndarray
+    frames: list
+    cadence: float
+
+
+def _index_lab_stream(f: h5py.File, block: str) -> _LabStream:
+    frames_path = f"timestream/{block}/frames"
+    if frames_path not in f:
+        raise ValueError(f"Lab block {block}: missing frames")
+    group = f[frames_path]
+    times_parts, frames = [], []
+    names = pairs = None
+    count = 0
+    for key in sorted((k for k in group if k.isdigit()), key=int):
+        frame = group[key]
+        frame_type = frame.attrs.get("frame_type", "")
+        if isinstance(frame_type, bytes):
+            frame_type = frame_type.decode("utf-8")
+        if frame_type != "Scan":
+            continue
+        if "data" not in frame or any(k not in frame["data"] for k in ("names", "times", "data")):
+            raise ValueError(f"Lab block {block} frame {key}: missing IQ data, names or times")
+        data = frame["data"]
+        frame_names = [n.decode("utf-8") if isinstance(n, bytes) else str(n) for n in data["names"][:]]
+        timestamps = np.asarray(data["times"])
+        if timestamps.ndim != 1 or timestamps.dtype.kind not in "iu" or not len(timestamps):
+            raise ValueError(f"Lab block {block} frame {key}: invalid timestamps")
+        timestamps = timestamps.astype(np.int64)
+        if data["data"].shape != (len(frame_names), len(timestamps)):
+            raise ValueError(f"Lab block {block} frame {key}: IQ data shape does not match names/times")
+        if names is None:
+            names = frame_names
+            pairs = _lab_channel_pairs(names, block)
+        elif names != frame_names:
+            raise ValueError(f"Lab block {block} frame {key}: IQ channel names changed")
+        frames.append((count, count + len(timestamps), data["data"].name))
+        count += len(timestamps)
+        times_parts.append(timestamps)
+    if not times_parts or pairs is None:
+        raise ValueError(f"Lab block {block}: no scan frames")
+    timestamps = np.concatenate(times_parts)
+    differences = np.diff(timestamps)
+    if len(differences) == 0 or np.any(differences <= 0):
+        raise ValueError(f"Lab block {block}: timestamps must be strictly increasing")
+    return _LabStream(
+        block, pairs, _load_lab_calibration(f, block, len(pairs)), timestamps,
+        frames, float(np.median(differences)))
+
+
+def _load_lab_pointing(f: h5py.File):
+    if "hk/frames" not in f:
+        raise ValueError("Lab file is missing housekeeping frames")
+    samples = []
+    for frame in f["hk/frames"].values():
+        if "blocks" not in frame:
+            continue
+        for block in frame["blocks"].values():
+            fields = ("times", "Azimuth_current_position", "Elevation_current_position")
+            if not all(name in block for name in fields):
                 continue
-            timestream_grp = f["timestream"]
-            blocks = list(timestream_grp.keys())
-            if not blocks:
-                continue
-
-            # Determine available frame keys from the first block
-            first_block = blocks[0]
-            if "frames" not in timestream_grp[first_block]:
-                continue
-            frames_grp = timestream_grp[first_block]["frames"]
-            frame_keys = sorted([k for k in frames_grp.keys() if k.isdigit()], key=int)
-
-            for fk in frame_keys:
-                sample_block = frames_grp[fk]
-                frame_type = sample_block.attrs.get("frame_type", b"")
-                if isinstance(frame_type, bytes):
-                    frame_type = frame_type.decode("utf-8")
-
-                if frame_type != "Scan":
-                    continue
-
-                block_data_list = []
-                min_samps = None
-
-                # Gather data from all detector blocks for this frame
-                for block in blocks:
-                    block_frame_path = f"timestream/{block}/frames/{fk}"
-                    if block_frame_path not in f:
-                        continue
-                    b_frame = f[block_frame_path]
-                    
-                    if "data" not in b_frame or "data" not in b_frame["data"] or "times" not in b_frame["data"]:
-                        continue
-
-                    names_ds = b_frame["data"]["names"][:]
-                    names = [n.decode("utf-8") if isinstance(n, bytes) else str(n) for n in names_ds]
-                    
-                    sig_ds = b_frame["data"]["data"][:]      # (n_channels, n_samps)
-                    times_ds = b_frame["data"]["times"][:]   # (n_samps,)
-                    if sig_ds.ndim != 2 or sig_ds.shape != (len(names), len(times_ds)):
-                        raise ValueError(f"Lab block {block} frame {fk}: IQ data shape does not match names/times")
-                    if block not in calibrations:
-                        pairs = _lab_channel_pairs(names, block)
-                        calibrations[block] = (pairs, _load_lab_calibration(f, block, len(pairs)))
-                        block_names[block] = names
-                    elif names != block_names[block]:
-                        raise ValueError(f"Lab block {block} frame {fk}: IQ channel names changed")
-
-                    n_samps = len(times_ds)
-                    if min_samps is None or n_samps < min_samps:
-                        min_samps = n_samps
-
-                    block_data_list.append((block, sig_ds, times_ds))
-
-                if not block_data_list or min_samps is None or min_samps == 0:
-                    continue
-
-                # Align and concatenate across blocks up to min_samps
-                kids_list = []
-                sig_parts = []
-                reference_times = None
-
-                for block, sig_ds, times_ds in block_data_list:
-                    pairs, (frequencies, iq, tones) = calibrations[block]
-                    kids_list.extend(name for name, _, _ in pairs)
-                    converted = np.empty((min_samps, len(pairs)), dtype=float)
-                    for j, (name, i_row, q_row) in enumerate(pairs):
-                        converted[:, j], _ = tod.iq_to_df_hybrid(
-                            sig_ds[i_row, :min_samps], sig_ds[q_row, :min_samps],
-                            iq[j].real, iq[j].imag, frequencies[j], f_tone=tones[j])
-                        if not np.all(np.isfinite(converted[:, j])):
-                            raise ValueError(f"Lab block {block} frame {fk}: non-finite df for {name}")
-                    sig_parts.append(converted)
-                    if reference_times is None:
-                        reference_times = times_ds[:min_samps]
-
-                kids = kids_list
-                if expected_kids is None:
-                    expected_kids = kids
-                elif kids != expected_kids:
-                    raise ValueError(f"Lab frame {fk} in {path}: detector list changed")
-                sig = np.concatenate(sig_parts, axis=1)  # (n_samps, n_total_dets)
-                n_samps = min_samps
-                n_dets = len(kids)
-
-                t_start = reference_times[0] / core.G3Units.s
-                t_stop = reference_times[-1] / core.G3Units.s
-
-                if sample_rate_ref[0] is None and t_stop > t_start:
-                    sample_rate_ref[0] = n_samps / (t_stop - t_start)
-                sample_rate = sample_rate_ref[0] if sample_rate_ref[0] is not None else 1.0
-
-                ra_bore = reference_times / core.G3Units.s
-                dec_bore = np.zeros_like(ra_bore)
-                flags = np.zeros((n_samps, n_dets), dtype=int)
-
-                yield Chunk(
-                    kids=kids, signal=sig, common_mode=None,
-                    ra=None, dec=None,
-                    ra_bore=ra_bore, dec_bore=dec_bore,
-                    boresight_q=None, det_dirs=None,
-                    t_start=t_start, t_stop=t_stop,
-                    sample_rate=sample_rate, flags=flags,
-                    chunk_index=-1,
-                )
+            times = np.asarray(block["times"])
+            az = np.asarray(block[fields[1]], dtype=float)
+            el = np.asarray(block[fields[2]], dtype=float)
+            if (times.ndim != 1 or times.dtype.kind not in "iu" or not len(times)
+                    or az.shape != times.shape or el.shape != times.shape
+                    or not np.all(np.isfinite(az)) or not np.all(np.isfinite(el))
+                    or np.any((az < 0) | (az >= 360)) or np.any((el < -90) | (el > 90))):
+                raise ValueError(f"Invalid lab housekeeping pointing in {block.name}")
+            samples.append((times.astype(np.int64), az, el))
+    if not samples:
+        raise ValueError("Lab file has no housekeeping azimuth/elevation samples")
+    times = np.concatenate([s[0] for s in samples])
+    az = np.concatenate([s[1] for s in samples])
+    el = np.concatenate([s[2] for s in samples])
+    order = np.argsort(times)
+    times, az, el = times[order], az[order], el[order]
+    differences = np.diff(times)
+    if len(differences) == 0 or np.any(differences <= 0):
+        raise ValueError("Lab housekeeping pointing timestamps must be strictly increasing")
+    return times, np.unwrap(np.deg2rad(az)), el, float(np.median(differences))
 
 
-# ============================================================================ #
-# _iter_h5_lab_chunks
+def _lab_brackets(times: np.ndarray, targets: np.ndarray, cadence: float):
+    """Find valid interpolation brackets without spanning missing samples."""
+    right = np.searchsorted(times, targets, side="left")
+    right = np.clip(right, 0, len(times) - 1)
+    exact = np.abs(times[right] - targets) < 0.01
+    left = np.where(exact, right, right - 1)
+    valid = (left >= 0) & (targets >= times[0]) & (targets <= times[-1])
+    left = np.maximum(left, 0)
+    valid &= exact | ((times[right] - times[left]) <= _LAB_GAP_FACTOR * cadence)
+    return left, right, valid
+
+
+def _read_lab_aligned(f: h5py.File, stream: _LabStream, origin: int,
+                      targets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    times = (stream.times - origin).astype(float)
+    left, right, valid = _lab_brackets(times, targets, stream.cadence)
+    start, stop = int(left.min()), int(right.max()) + 1
+    parts = [
+        np.asarray(f[path][:, max(start, lo) - lo:min(stop, hi) - lo])
+        for lo, hi, path in stream.frames if lo < stop and hi > start
+    ]
+    raw = np.concatenate(parts, axis=1)
+    source_times = times[start:stop]
+    frequencies, iq, tones = stream.calibration
+    signal = np.empty((len(targets), len(stream.pairs)), dtype=float)
+    for j, (name, i_row, q_row) in enumerate(stream.pairs):
+        converted, _ = tod.iq_to_df_hybrid(
+            raw[i_row], raw[q_row], iq[j].real, iq[j].imag,
+            frequencies[j], f_tone=tones[j])
+        if not np.all(np.isfinite(converted)):
+            raise ValueError(f"Lab block {stream.block}: non-finite df for {name}")
+        signal[:, j] = np.interp(targets, source_times, converted)
+    signal[~valid, :] = np.nan
+    flags = np.zeros(signal.shape, dtype=int)
+    flags[~valid, :] = tod.GAP_FLAG
+    return signal, flags
+
+
 def _iter_h5_lab_chunks(
-        files: list, chunk_duration_s: float | str,
-        apply_offsets: bool = True, pipeline_cfg: dict | None = None
-        ) -> Iterator[Chunk]:
-    """Yield fixed-duration Chunks directly from HDF5 lab files."""
-    frame_iter = _iter_h5_lab_frames(files, apply_offsets)
-    return _rechunk(frame_iter, chunk_duration_s, pipeline_cfg)
-
-
-
-# ============================================================================ #
-# _precalcChunkTotal
-def _precalcChunkTotal(cfg):
-    """Estimate the number of chunks without loading the detector timestreams.
-    """
-
-    if cfg["data"]["format"] != "lab":
-        return {"total_chunks": None}
-    if cfg["pipeline"].get("chunk_duration_s", 1.0) == "auto":
-        return {"total_chunks": None}
-
-    files = []
-    file_format = cfg["data"]["file_format"]
-    for pattern in cfg["data"]["input_dirs"]:
-        for directory in sorted(glob.glob(pattern)):
-            files.extend(sorted(pathlib.Path(directory).rglob(f"*.{file_format}")))
-
-    if not files:
-        return {"total_chunks": None}
-
-    total_samples = 0
-    scan_frames = 0
+        files: list, chunk_duration_s: float | str, site,
+        pipeline_cfg: dict | None = None) -> Iterator[Chunk]:
+    """Yield lab chunks on a shared timestamp grid with housekeeping pointing."""
+    expected_kids = None
     sample_rate_ref = None
-    chunk_sample_rate = None
-
+    last_stop = None
+    chunk_index = 0
     for path in files:
         with h5py.File(path, "r") as f:
-            if "timestream" not in f:
-                continue
-            timestream = f["timestream"]
-            blocks = list(timestream.keys())
-            if not blocks:
-                continue
+            if "timestream" not in f or not len(f["timestream"]):
+                raise ValueError(f"Lab file {path}: missing timestream blocks")
+            streams = [_index_lab_stream(f, block) for block in f["timestream"]]
+            kids = [name for stream in streams for name, _, _ in stream.pairs]
+            if expected_kids is None:
+                expected_kids = kids
+            elif kids != expected_kids:
+                raise ValueError(f"Lab file {path}: detector list changed")
+            origin = max(int(stream.times[0]) for stream in streams)
+            end = min(int(stream.times[-1]) for stream in streams)
+            if end <= origin:
+                raise ValueError(f"Lab file {path}: detector blocks have no common time interval")
+            cadence = streams[0].cadence
+            sample_rate = _LAB_TICKS_PER_SECOND / cadence
+            if sample_rate_ref is not None and not np.isclose(sample_rate, sample_rate_ref, rtol=1e-4):
+                raise ValueError(f"Lab file {path}: sample rate changed between files")
+            sample_rate_ref = sample_rate
+            if last_stop is not None and origin <= last_stop:
+                raise ValueError(f"Lab file {path}: observations overlap or are out of time order")
+            n_samples = int(np.floor((end - origin) / cadence)) + 1
+            hk_times, hk_az, hk_el, hk_cadence = _load_lab_pointing(f)
+            hk_times = (hk_times - origin).astype(float)
+            if chunk_duration_s == "auto":
+                if pipeline_cfg is None:
+                    raise ValueError("Automatic chunk sizing requires pipeline configuration")
+                chunk_n = _auto_chunk_samples(len(kids), sample_rate, pipeline_cfg)
+            elif chunk_duration_s > 0:
+                chunk_n = max(1, int(chunk_duration_s * sample_rate))
+            else:
+                chunk_n = None
+            if chunk_n is None:
+                grid = np.arange(n_samples, dtype=float) * cadence
+                boundaries = [0]
+                for _, hi, _ in streams[0].frames:
+                    frame_end = float(streams[0].times[hi - 1] - origin)
+                    boundary = int(np.searchsorted(grid, frame_end, side="right"))
+                    if boundary > boundaries[-1]:
+                        boundaries.append(boundary)
+                if boundaries[-1] < n_samples:
+                    boundaries.append(n_samples)
+                windows = zip(boundaries[:-1], boundaries[1:])
+            else:
+                windows = ((start, min(start + chunk_n, n_samples))
+                           for start in range(0, n_samples, chunk_n))
+            for start, stop in windows:
+                targets = np.arange(start, stop, dtype=float) * cadence
+                _, _, pointing_valid = _lab_brackets(hk_times, targets, hk_cadence)
+                if not np.all(pointing_valid):
+                    raise ValueError(f"Lab file {path}: housekeeping pointing does not cover the detector timestamps")
+                az = np.rad2deg(np.interp(targets, hk_times, hk_az)) % 360
+                el = np.interp(targets, hk_times, hk_el)
+                unix_times = origin / _LAB_TICKS_PER_SECOND + targets / _LAB_TICKS_PER_SECOND
+                ra, dec = coord.altaz_to_radec(az, el, unix_times, site)
+                signals, flags = zip(*[
+                    _read_lab_aligned(f, stream, origin, targets) for stream in streams])
+                t_start = origin / _LAB_TICKS_PER_SECOND + start / sample_rate
+                t_stop = origin / _LAB_TICKS_PER_SECOND + stop / sample_rate
+                yield Chunk(
+                    kids=kids, signal=np.concatenate(signals, axis=1), common_mode=None,
+                    ra=None, dec=None, ra_bore=ra, dec_bore=dec,
+                    boresight_q=None, det_dirs=None, t_start=t_start, t_stop=t_stop,
+                    sample_rate=sample_rate, flags=np.concatenate(flags, axis=1),
+                    chunk_index=chunk_index)
+                chunk_index += 1
+            last_stop = origin + int(round((n_samples - 1) * cadence))
 
-            first_block_frames = timestream[blocks[0]].get("frames")
-            if first_block_frames is None:
-                continue
-            frame_keys = sorted(
-                (key for key in first_block_frames.keys() if key.isdigit()),
-                key=int,
-            )
 
-            for frame_key in frame_keys:
-                sample_frame = first_block_frames[frame_key]
-                frame_type = sample_frame.attrs.get("frame_type", b"")
-                if isinstance(frame_type, bytes):
-                    frame_type = frame_type.decode("utf-8")
-                if frame_type != "Scan":
-                    continue
-
-                min_samples = None
-                reference_times = None
-                for block in blocks:
-                    frame_path = f"timestream/{block}/frames/{frame_key}"
-                    if frame_path not in f:
-                        continue
-                    block_frame = f[frame_path]
-                    if (
-                        "data" not in block_frame
-                        or "data" not in block_frame["data"]
-                        or "times" not in block_frame["data"]
-                    ):
-                        continue
-
-                    times = block_frame["data"]["times"]
-                    n_samples = times.shape[0]
-                    if min_samples is None or n_samples < min_samples:
-                        min_samples = n_samples
-                    if reference_times is None:
-                        reference_times = times
-
-                if not min_samples:
-                    continue
-
-                scan_frames += 1
-                total_samples += min_samples
-
-                if sample_rate_ref is None and reference_times is not None:
-                    t_start = reference_times[0] / core.G3Units.s
-                    t_stop = reference_times[min_samples - 1] / core.G3Units.s
-                    if t_stop > t_start:
-                        sample_rate_ref = min_samples / (t_stop - t_start)
-                if chunk_sample_rate is None:
-                    chunk_sample_rate = sample_rate_ref or 1.0
-
-    chunk_duration_s = cfg["pipeline"].get("chunk_duration_s", 1.0)
-    if chunk_duration_s <= 0:
-        total_chunks = scan_frames
-    elif total_samples == 0:
-        total_chunks = 0
-    else:
-        chunk_size = max(1, int(chunk_duration_s * (chunk_sample_rate or 1.0)))
-        total_chunks = (total_samples + chunk_size - 1) // chunk_size
-
-    return {"total_chunks": total_chunks}
+def _precalcChunkTotal(cfg):
+    """Chunk counts are not known until input timestamps have been indexed."""
+    return {"total_chunks": None}
 
 
 
@@ -878,8 +859,18 @@ def iter_chunks(cfg: dict, apply_offsets: bool = True) -> Iterator[Chunk]:
     max_duration_s   = cfg["pipeline"].get("max_duration_s", None)
 
     if fmt == "lab":
+        if file_fmt != "h5":
+            raise ValueError("Lab data currently requires HDF5 input")
+        map_cfg = cfg.get("map", {})
+        if "site" not in map_cfg and not any(
+                key in map_cfg for key in ("site_lat_deg", "site_lon_deg", "site_height_m")):
+            raise ValueError("Lab pointing requires an explicit map.site or site latitude, longitude and height")
+        site = coord.resolveSite(cfg)
+        if site is None:
+            raise ValueError(f"Unknown lab observing site {map_cfg.get('site')!r}")
+        LOGGER.warning("Lab detector pointing offsets are unavailable; using boresight pointing")
         chunked_iter = _iter_h5_lab_chunks(
-            files, chunk_duration_s, apply_offsets, pipeline_cfg)
+            files, chunk_duration_s, site, pipeline_cfg)
 
     elif fmt == "simulation" and file_fmt == "h5":
         # HDF5 datasets support direct index slicing, so chunks are read

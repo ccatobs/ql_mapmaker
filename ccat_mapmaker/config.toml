@@ -46,9 +46,8 @@ input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/planet_A
 file_format = "h5"
 
 # Data organization inside the files. (string)
-# "simulation" reads TOAST-style simulation data. "lab" converts draft HDF5
-# IQ data to fractional frequency shifts; timing alignment and pointing are
-# not yet implemented for lab maps.
+# "simulation" reads TOAST-style simulation data. "lab" reads draft HDF5 IQ
+# data, aligns detector times, and uses housekeeping pointing.
 format = "simulation"
 
 
@@ -73,12 +72,17 @@ format = "simulation"
 # Alternative to explicit coordinates: resolve the center from a name. This is
 # ignored while both ra0_deg and dec0_deg are set.
 # Solar-system bodies such as "jupiter", "saturn", "moon", and "sun" are
-# resolved with an ephemeris at the observation start time. The default site
-# is FYST; a supported telemetry-derived site can be selected with site.
+# resolved with an ephemeris at the observation start time. Simulations default
+# to FYST. Lab data requires an explicit observing site for pointing.
 # Other names are resolved through SkyCoord.from_name and require network
 # access to SIMBAD.
 #target = "jupiter"
+# Use "fyst" only when the observation was actually taken at FYST.
 #site = "fyst"
+# Alternatively provide all three site coordinates (east-positive longitude).
+#site_lat_deg = -22.98592
+#site_lon_deg = -67.74028
+#site_height_m = 5610
 
 # Map extent in degrees. Each axis is independent: omit xlen_deg and/or
 # ylen_deg to size that axis automatically from finite, usable pointing for

@@ -56,8 +56,8 @@ The sample-backed tests are skipped when their data is unavailable. By default
 they look under `~/notebooks/data/ql_mm_samples/`; set
 `CCAT_MAPMAKER_LAB_SAMPLE_DIR`, `CCAT_MAPMAKER_SIM_SAMPLE_DIR`, or
 `CCAT_MAPMAKER_G3_SAMPLE_DIR` to the corresponding sample directory to override
-those locations. The lab and G3 integration tests need `spt3g`; see Setup for
-why it is included in the environment for every run.
+those locations. The G3 integration test needs `spt3g`; the lab tests can use a
+stub when it is unavailable. The application itself still requires `spt3g`.
 
 The simulation test uses `Jupiter-0-0.h5` and creates a temporary HDF5 virtual
 view of a 20-second Jupiter crossing, without copying the multi-GB detector
@@ -94,10 +94,38 @@ sweep derivative; malformed or
 ambiguous calibration is an error. Detector names are qualified by block,
 for example `B1D1:r0000`.
 
-**Lab maps are not yet scientifically usable:** block streams are still
-combined by frame/sample index rather than aligned by timestamp, and the
-reader still supplies placeholder pointing instead of housekeeping azimuth
-and elevation. IQ conversion alone does not calibrate incident power.
+The reader assumes lab timestamps are Unix UTC in 10 ns units. It linearly
+interpolates converted detector streams onto a common, regular grid over the
+blocks' shared time interval, including across frame boundaries. Gaps wider
+than 1.5 times a block's median sample period are flagged rather than
+interpolated. A detector's non-finite PSD segments are skipped with a warning.
+Linear interpolation affects the noise and signal response near Nyquist; it is
+not an anti-aliasing filter.
+
+Gap filling cannot fill a gap at a chunk edge or an entirely missing detector
+chunk. When high-pass or notch filtering is enabled, such gaps cause an error
+rather than contaminating a whole filtered timestream. Adjust the chunking or
+disable those filters for the affected data.
+
+Lab pointing uses time-interpolated housekeeping azimuth/elevation (azimuth
+measured east of north, in degrees) and a zero-pressure AltAz-to-ICRS
+transformation. It requires an explicitly configured observing site:
+
+```toml
+[map]
+site = "fyst"             # Only if FYST is the actual observing site
+# Or, instead of site, set all three:
+# site_lat_deg = ...
+# site_lon_deg = ...      # East-positive degrees
+# site_height_m = ...
+```
+
+Missing or gapped housekeeping coverage is an error. Astropy requires
+appropriate Earth-orientation data for the observation time. No detector
+focal-plane offsets are available in this lab format, so all detectors use
+boresight pointing; per-detector maps log a warning if offsets were requested.
+The supplied stationary lab sample is a format test, not a sky scan. IQ
+conversion alone does not calibrate incident power.
 
 ### 2. Set the map centre and size (optional)
 

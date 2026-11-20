@@ -603,8 +603,7 @@ def _highpassFilter(
     freqs = fft.rfftfreq(n_samps, d=1.0 / sample_rate)
 
     # Broadcast frequency mask across channels
-    mask = (freqs < cutoff_hz)[:, np.newaxis]
-    tod_fft[mask] = 0.0
+    tod_fft[freqs < cutoff_hz, :] = 0.0
 
     # Inverse transform
     filtered_tod = fft.irfft(tod_fft, n=n_samps, axis=0)
@@ -704,11 +703,15 @@ def cleanTod(
     # Apply a high pass filter.
     # Affects entire TOD, so nothing to flag?
     if (params := steps.get('highpass')) is not None:
-        tod_clean = _highpassFilter(tod, sample_rate, **params)
+        if params.get("cutoff_hz", 0.0) > 0 and not np.all(np.isfinite(tod_clean)):
+            raise ValueError("High-pass filtering requires finite TOD; chunk contains an unfillable gap")
+        tod_clean = _highpassFilter(tod_clean, sample_rate, **params)
 
     # Apply the notch filter.
     # Affects entire TOD, so nothing to flag?
     if (params := steps.get('notch')) is not None:
+        if params.get("freq_hz", 60.0) > 0 and not np.all(np.isfinite(tod_clean)):
+            raise ValueError("Notch filtering requires finite TOD; chunk contains an unfillable gap")
         tod_clean = _notchFilter(tod_clean, sample_rate, **params)
 
     return tod_clean, clean_flags

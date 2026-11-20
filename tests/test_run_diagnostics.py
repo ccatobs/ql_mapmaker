@@ -11,6 +11,7 @@ from unittest import mock
 
 import h5py
 import numpy as np
+from astropy.utils import iers
 from scipy.signal import welch
 from scipy.spatial.transform import Rotation
 
@@ -356,9 +357,6 @@ class RunDiagnosticsTests(unittest.TestCase):
                                 for call in clean.call_args_list))
 
     def test_lab_sample_h5_generates_map_with_sample_step(self):
-        if self.spt_patch is not None:
-            self.skipTest("spt3g is required to map the lab HDF5 sample")
-
         sample_dir = Path(os.environ.get(
             "CCAT_MAPMAKER_LAB_SAMPLE_DIR",
             Path.home() / "notebooks/data/ql_mm_samples/lab/sample_h5",
@@ -378,6 +376,7 @@ class RunDiagnosticsTests(unittest.TestCase):
                 'file_format = "h5"\n'
                 'format = "lab"\n'
                 "[map]\n"
+                'site = "fyst"\n'
                 "res_arcmin = 60.0\n"
                 "[pipeline]\n"
                 "chunk_duration_s = 0\n"
@@ -398,8 +397,10 @@ class RunDiagnosticsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with mock.patch.object(
-                    sys, "argv", ["run_mapmaker", "--config", str(config)]):
+            with iers.conf.set_temp("auto_download", False), \
+                    iers.conf.set_temp("auto_max_age", None), \
+                    mock.patch.object(
+                        sys, "argv", ["run_mapmaker", "--config", str(config)]):
                 self.runner.main()
 
             run, = (root / "results").iterdir()
@@ -781,6 +782,49 @@ class RunDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["processing_stats"]["psd_time_samples_used"], 16)
         self.assertEqual(result["processing_stats"]["psd_eligible_time_samples"], 28)
         self.assertIn("16 of 28", logs.output[0])
+
+    def test_prep_retains_detector_offset_after_a_fully_gapped_chunk(self):
+        state = self.runner
+        cfg = {"data": {}, "pipeline": {}}
+        chunks = []
+        for i in range(2):
+            signal = np.column_stack((np.arange(16, dtype=float), np.full(16, 5.)))
+            flags = np.zeros_like(signal, dtype=int)
+            if i == 1:
+                signal[:, 1] = np.nan
+                flags[:, 1] = state.tod.GAP_FLAG
+            chunks.append(state.reader.Chunk(
+                kids=["a", "b"], signal=signal, common_mode=None,
+                ra=None, dec=None, ra_bore=np.full(16, .5), dec_bore=np.full(16, .5),
+                t_start=float(i * 16), t_stop=float((i + 1) * 16),
+                sample_rate=16., chunk_index=i, flags=flags))
+        with mock.patch.object(state.reader, "iter_chunks", return_value=iter(chunks)), \
+                self.assertLogs("ccat_mapmaker", level="WARNING") as logs:
+            result = state._prepPass(cfg)
+        np.testing.assert_allclose(result["det_offsets"], [7.5, 5.])
+        first_psd = state._fastPeriodogram(
+            chunks[0].signal, np.hanning(16)[:, None], 16 * np.sum(np.hanning(16)**2),
+            np.array([7.5, 5.]), 16)
+        np.testing.assert_allclose(result["psd_avg"][:, 1], first_psd[:, 1])
+        self.assertTrue(any("Skipped non-finite weighting PSD" in line for line in logs.output))
+
+    def test_per_detector_maps_use_boresight_when_offsets_are_unavailable(self):
+        state = self.runner
+        chunk = next(self.fake_chunks([None]))
+        signal = chunk.signal.copy()
+        signal[[0, -1], 0] = np.nan
+        chunk = replace(chunk, ra=None, dec=None, signal=signal)
+        cfg = {"pipeline": {}}
+        with mock.patch.object(state.reader, "iter_chunks", return_value=iter([chunk])), \
+                self.assertLogs("ccat_mapmaker", level="WARNING") as logs:
+            names, data, hits = state._per_detector_pass(
+                cfg, {"clean_steps": []}, {"apply_offsets": True},
+                np.array([9., 11.]), np.array([19., 21.]), np.zeros(3), np.ones(3))
+        self.assertEqual(names, chunk.kids)
+        self.assertTrue(np.all(hits[:, 0, 0] > 0))
+        self.assertTrue(np.all(np.isfinite(data)))
+        self.assertEqual(hits[0, 0, 0], len(signal) - 2)
+        self.assertTrue(any("boresight pointing" in line for line in logs.output))
 
     def test_saved_nulls_come_from_last_pass(self):
         for iterations in (0, 1):

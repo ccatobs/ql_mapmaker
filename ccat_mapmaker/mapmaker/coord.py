@@ -11,7 +11,7 @@
 from typing import Optional
 
 from astropy.time import Time
-from astropy.coordinates import EarthLocation, SkyCoord, get_body
+from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_body
 import astropy.units as u
 
 import numpy as np
@@ -19,7 +19,6 @@ from scipy.spatial.transform import Rotation
 
 
 # FYST site on Cerro Chajnantor for simulations and when there is real data
-# TODO: move to config
 FYST_SITE = EarthLocation(lat=-22.98592 * u.deg, lon=-67.74028 * u.deg, height=5610 * u.m)
 
 _Z_AXIS = np.array([0.0, 0.0, 1.0])
@@ -75,12 +74,31 @@ def resolveSite(
     """
 
     map_cfg = cfg.get("map", {})
-    
+    location_keys = ("site_lat_deg", "site_lon_deg", "site_height_m")
+    if any(key in map_cfg for key in location_keys):
+        if not all(key in map_cfg for key in location_keys) or "site" in map_cfg:
+            raise ValueError("Provide either map.site or all three site latitude, longitude and height fields")
+        lat, lon, height = (map_cfg[key] for key in location_keys)
+        if not all(np.isfinite(value) for value in (lat, lon, height)) or not -90 <= lat <= 90 or not -180 <= lon <= 180:
+            raise ValueError("Invalid map site latitude, longitude or height")
+        return EarthLocation.from_geodetic(lon * u.deg, lat * u.deg, height * u.m)
+
     # Look up static sites (e.g., "fyst" -> target.FYST_SITE)
     site_name = map_cfg.get("site", "fyst")
     site = globals().get(f"{site_name.upper()}_SITE")
     
     return site
+
+
+def altaz_to_radec(az_deg: np.ndarray, el_deg: np.ndarray,
+                   unix_seconds: np.ndarray, site: EarthLocation) -> tuple[np.ndarray, np.ndarray]:
+    """Convert geometric azimuth/elevation to ICRS coordinates at the given site."""
+    obstime = Time(unix_seconds, format="unix", scale="utc")
+    altaz = SkyCoord(
+        az=az_deg * u.deg, alt=el_deg * u.deg,
+        frame=AltAz(obstime=obstime, location=site, pressure=0 * u.hPa))
+    icrs = altaz.icrs
+    return icrs.ra.deg, icrs.dec.deg
 
 
 # ============================================================================ #

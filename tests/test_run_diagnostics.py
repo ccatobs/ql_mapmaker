@@ -407,13 +407,29 @@ class RunDiagnosticsTests(unittest.TestCase):
             metadata = json.loads((run / "metadata.json").read_text())
             self.assertEqual(metadata["status"], "completed")
             self.assertEqual(metadata["resolved_settings"]["pipeline"]["sample_step"], 50)
+            self.assertEqual(metadata["n_detectors"], 8000)
+            self.assertEqual(metadata["n_detectors_used"], 8000)
             self.assertEqual(
                 metadata["input_files_opened"],
                 [str(sample_files[0].resolve())],
             )
+            with h5py.File(sample_files[0], "r") as sample:
+                blocks = sample["timestream"]
+                first_times = [
+                    int(blocks[block]["frames/1/data/times"][0]) for block in blocks]
+                times = blocks[next(iter(blocks))]["frames/1/data/times"][:]
+                expected_rate = 1e8 / np.median(np.diff(times)) / 50
+            self.assertAlmostEqual(metadata["obs_t_start_g3s"], max(first_times) / 1e8, places=6)
+            self.assertAlmostEqual(metadata["sample_rate_hz"], expected_rate, places=8)
+            self.assertTrue(0 <= metadata["map_ra0_deg"] < 360)
+            self.assertTrue(-90 <= metadata["map_dec0_deg"] <= 90)
             self.assertGreater(metadata["map_quality"]["covered_pixels"], 0)
-            self.assertTrue((run / "naive.npy").is_file())
-            self.assertTrue(np.isfinite(np.load(run / "naive.npy")).any())
+            naive = np.load(run / "naive.npy")
+            hits = np.load(run / "hits.npy")
+            self.assertEqual(naive.shape, (metadata["map_ny"], metadata["map_nx"]))
+            self.assertEqual(hits.shape, naive.shape)
+            self.assertTrue(np.all(np.isfinite(naive[hits > 0])))
+            self.assertGreater(np.sum(hits), 0)
 
     def test_toast_jupiter_sample_recovers_source(self):
         sample_dir = Path(os.environ.get(

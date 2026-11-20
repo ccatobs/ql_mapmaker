@@ -470,7 +470,11 @@ dec_edges = np.load("output/<timestamp>/dec_edges.npy")
 ## Troubleshooting
 
 **`ModuleNotFoundError: No module named 'spt3g'`**
-The `ccat` conda environment is not active. Run `conda activate ccat`.
+Check which Python is running with `python -c "import sys; print(sys.executable)"`.
+Activate the environment where `spt3g` is installed (for example,
+`conda activate ccat`, or `source .venv/bin/activate` for an existing virtual
+environment on macOS/Linux), and verify with `python -c "import spt3g"`.
+In VS Code, select the same interpreter for the workspace.
 
 **`FileNotFoundError` on startup**
 Check that `input_dirs` in `config.toml` points to a directory that contains files matching `file_format`. The path is relative to the location of `config.toml`.

@@ -46,8 +46,9 @@ input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/planet_A
 file_format = "h5"
 
 # Data organization inside the files. (string)
-# "simulation" reads TOAST-style simulation data. "lab" reads the real-data
-# organization and applies the corresponding signal conversion path.
+# "simulation" reads TOAST-style simulation data. "lab" converts draft HDF5
+# IQ data to fractional frequency shifts; timing alignment and pointing are
+# not yet implemented for lab maps.
 format = "simulation"
 
 

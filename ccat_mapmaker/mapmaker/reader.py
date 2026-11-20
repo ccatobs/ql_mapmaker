@@ -30,8 +30,10 @@ All arrays are time-first: (n_samps, n_dets).
 
 import io
 import glob
+import logging
 import math
 import pathlib
+import re
 from collections import deque
 from typing import Iterator, Optional
 
@@ -45,6 +47,8 @@ from mapmaker import tod
 from mapmaker import coord
 # from mapmaker import output
 # from mapmaker import reader
+
+LOGGER = logging.getLogger("ccat_mapmaker")
 
 
 # ============================================================================ #
@@ -263,15 +267,102 @@ def _rechunk(
 # ============================================================================ #
 
 
+def _lab_channel_pairs(names: list[str], block: str) -> list[tuple[str, int, int]]:
+    """Match the block-local resonator IDs to their I and Q channel rows."""
+    pairs: dict[int, dict[str, int]] = {}
+    for row, name in enumerate(names):
+        match = re.fullmatch(r"r(\d+)_([IQ])", name)
+        if match is None:
+            raise ValueError(f"Lab block {block}: unrecognized IQ channel {name!r}")
+        index, component = int(match.group(1)), match.group(2)
+        pair = pairs.setdefault(index, {})
+        if component in pair:
+            raise ValueError(f"Lab block {block}: duplicate {component} channel for r{index:04d}")
+        pair[component] = row
+
+    if not pairs or sorted(pairs) != list(range(len(pairs))):
+        raise ValueError(f"Lab block {block}: resonator IDs must be contiguous starting at r0000")
+    if any(set(pair) != {"I", "Q"} for pair in pairs.values()):
+        raise ValueError(f"Lab block {block}: every resonator must have both I and Q channels")
+    return [
+        (f"{block}:r{index:04d}", pairs[index]["I"], pairs[index]["Q"])
+        for index in range(len(pairs))
+    ]
+
+
+def _load_lab_calibration(f: h5py.File, block: str, n_dets: int):
+    """Load one target sweep and optional timestream frequency comb for a block."""
+    target_path = f"targ/{block}"
+    if target_path not in f or not isinstance(f[target_path], h5py.Group):
+        raise ValueError(f"Lab block {block}: missing target sweep group {target_path}")
+    targets = [
+        obj for name, obj in f[target_path].items()
+        if "targ" in name and isinstance(obj, h5py.Dataset)
+    ]
+    if len(targets) != 1:
+        raise ValueError(f"Lab block {block}: expected exactly one target sweep, found {len(targets)}")
+    sweep = np.asarray(targets[0])
+    if (
+        sweep.ndim != 2 or sweep.shape[0] != 2
+        or sweep.shape[1] % n_dets != 0 or sweep.shape[1] // n_dets < 2
+        or not np.iscomplexobj(sweep) or not np.all(np.isfinite(sweep))
+        or np.any(sweep[0].imag != 0)
+    ):
+        raise ValueError(f"Lab block {block}: invalid target sweep shape or values")
+    frequencies = sweep[0].real.reshape(n_dets, -1)
+    iq = sweep[1].reshape(n_dets, -1)
+    if np.any(frequencies <= 0) or np.any(np.diff(frequencies, axis=1) <= 0):
+        raise ValueError(f"Lab block {block}: target sweep frequencies must be positive and increasing")
+
+    comb_path = f"config/{block}/combs"
+    combs = []
+    if comb_path in f:
+        if not isinstance(f[comb_path], h5py.Group):
+            raise ValueError(f"Lab block {block}: {comb_path} is not a group")
+        combs = [
+            obj for name, obj in f[comb_path].items()
+            if "tstream_freq_comb" in name and isinstance(obj, h5py.Dataset)
+        ]
+    if len(combs) > 1:
+        raise ValueError(f"Lab block {block}: multiple timestream frequency combs")
+    if combs:
+        tones = np.asarray(combs[0])
+        if (
+            tones.shape != (n_dets,) or np.iscomplexobj(tones)
+            or not np.all(np.isfinite(tones))
+            or np.any(tones < frequencies[:, 0]) or np.any(tones > frequencies[:, -1])
+        ):
+            raise ValueError(f"Lab block {block}: invalid or out-of-sweep probe-tone frequencies")
+        LOGGER.info("Lab block %s probe tones: %s", block, combs[0].name)
+    else:
+        indices = [tod.find_i_dvmax(z.real, z.imag) for z in iq]
+        tones = frequencies[np.arange(n_dets), indices]
+        LOGGER.warning(
+            "Lab block %s has no timestream frequency comb; using maximum IQ "
+            "sweep derivative as the probe-tone estimate", block)
+
+    indices = np.argmin(np.abs(frequencies - tones[:, None]), axis=1)
+    offsets = tones - frequencies[np.arange(n_dets), indices]
+    neighbors = np.where(
+        offsets < 0, indices - 1,
+        np.where(indices + 1 < frequencies.shape[1], indices + 1, indices - 1))
+    if np.any(iq[np.arange(n_dets), indices] == iq[np.arange(n_dets), neighbors]):
+        raise ValueError(f"Lab block {block}: zero IQ sweep gradient at a probe tone")
+    return frequencies, iq, tones
+
+
 # ============================================================================ #
 # _iter_h5_lab_frames
 def _iter_h5_lab_frames(files: list, apply_offsets: bool = True) -> Iterator[Chunk]:
     """Yield one frame-level Chunk per scan frame from HDF5 lab files."""
 
     sample_rate_ref = [None]
+    expected_kids = None
 
     for path in files:
         with h5py.File(path, 'r') as f:
+            calibrations = {}
+            block_names = {}
             if "timestream" not in f:
                 continue
             timestream_grp = f["timestream"]
@@ -313,12 +404,20 @@ def _iter_h5_lab_frames(files: list, apply_offsets: bool = True) -> Iterator[Chu
                     
                     sig_ds = b_frame["data"]["data"][:]      # (n_channels, n_samps)
                     times_ds = b_frame["data"]["times"][:]   # (n_samps,)
+                    if sig_ds.ndim != 2 or sig_ds.shape != (len(names), len(times_ds)):
+                        raise ValueError(f"Lab block {block} frame {fk}: IQ data shape does not match names/times")
+                    if block not in calibrations:
+                        pairs = _lab_channel_pairs(names, block)
+                        calibrations[block] = (pairs, _load_lab_calibration(f, block, len(pairs)))
+                        block_names[block] = names
+                    elif names != block_names[block]:
+                        raise ValueError(f"Lab block {block} frame {fk}: IQ channel names changed")
 
                     n_samps = len(times_ds)
                     if min_samps is None or n_samps < min_samps:
                         min_samps = n_samps
 
-                    block_data_list.append((names, sig_ds, times_ds))
+                    block_data_list.append((block, sig_ds, times_ds))
 
                 if not block_data_list or min_samps is None or min_samps == 0:
                     continue
@@ -328,14 +427,25 @@ def _iter_h5_lab_frames(files: list, apply_offsets: bool = True) -> Iterator[Chu
                 sig_parts = []
                 reference_times = None
 
-                for names, sig_ds, times_ds in block_data_list:
-                    kids_list.extend(names)
-                    sig_trimmed = sig_ds[:, :min_samps].T.astype(float)  # (n_samps, n_channels)
-                    sig_parts.append(sig_trimmed)
+                for block, sig_ds, times_ds in block_data_list:
+                    pairs, (frequencies, iq, tones) = calibrations[block]
+                    kids_list.extend(name for name, _, _ in pairs)
+                    converted = np.empty((min_samps, len(pairs)), dtype=float)
+                    for j, (name, i_row, q_row) in enumerate(pairs):
+                        converted[:, j], _ = tod.iq_to_df_hybrid(
+                            sig_ds[i_row, :min_samps], sig_ds[q_row, :min_samps],
+                            iq[j].real, iq[j].imag, frequencies[j], f_tone=tones[j])
+                        if not np.all(np.isfinite(converted[:, j])):
+                            raise ValueError(f"Lab block {block} frame {fk}: non-finite df for {name}")
+                    sig_parts.append(converted)
                     if reference_times is None:
                         reference_times = times_ds[:min_samps]
 
                 kids = kids_list
+                if expected_kids is None:
+                    expected_kids = kids
+                elif kids != expected_kids:
+                    raise ValueError(f"Lab frame {fk} in {path}: detector list changed")
                 sig = np.concatenate(sig_parts, axis=1)  # (n_samps, n_total_dets)
                 n_samps = min_samps
                 n_dets = len(kids)

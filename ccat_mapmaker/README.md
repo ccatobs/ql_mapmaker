@@ -85,6 +85,20 @@ format      = "simulation"    # or "lab"
 
 `file_format` and `format` are independent: `file_format` says what kind of file to look for on disk, `format` says how to interpret its contents. TOAST simulations can be either `.g3` or `.h5`; real BLAST-TNG data is always `.g3`.
 
+The draft HDF5 lab reader pairs block-local I/Q channels and converts them to
+dimensionless fractional frequency shifts (`df/f0`) using each block's target
+sweep and timestream frequency comb. The sweep is interpolated at the actual
+comb frequency rather than snapping it to the nearest sweep point. If the comb
+is absent, the reader logs a warning and estimates the tone from the maximum IQ
+sweep derivative; malformed or
+ambiguous calibration is an error. Detector names are qualified by block,
+for example `B1D1:r0000`.
+
+**Lab maps are not yet scientifically usable:** block streams are still
+combined by frame/sample index rather than aligned by timestamp, and the
+reader still supplies placeholder pointing instead of housekeeping azimuth
+and elevation. IQ conversion alone does not calibrate incident power.
+
 ### 2. Set the map centre and size (optional)
 
 If you know where your source is, pin the map centre with `ra0_deg`/`dec0_deg`, or point at it by name with `target` (planets and other solar-system bodies are resolved from an ephemeris at the observation time; anything else is looked up on SIMBAD). Omit all three and the mapmaker auto-detects the centre from the boresight instead.

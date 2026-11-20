@@ -946,6 +946,35 @@ def find_i_ftone(Ff, f_tone):
 # ============================================================================ #
 
 
+def _iq_tone_reference(I, Q, If, Qf, Ff, f_tone, i_ft=None):
+    """Interpolate the sweep at the probe tone and return its local segment."""
+    if len(Ff) < 2:
+        raise ValueError("IQ conversion requires at least two sweep points")
+    if i_ft is not None:
+        f_tone = Ff[i_ft]
+    elif f_tone is None:
+        _, _, f_tone, i_ft = find_ftone_median(I, Q, If, Qf, Ff)
+    else:
+        if not np.isfinite(f_tone) or not min(Ff[0], Ff[-1]) <= f_tone <= max(Ff[0], Ff[-1]):
+            raise ValueError("Probe tone must lie within the frequency sweep")
+        i_ft = find_i_ftone(Ff, f_tone)
+
+    direction = (f_tone - Ff[i_ft]) * (Ff[-1] - Ff[0])
+    if direction > 0:
+        i_neighbor = i_ft + 1
+    elif direction < 0:
+        i_neighbor = i_ft - 1
+    else:
+        i_neighbor = i_ft + 1 if i_ft < len(Ff) - 1 else i_ft - 1
+    dF = Ff[i_neighbor] - Ff[i_ft]
+    if dF == 0:
+        raise ValueError("IQ conversion requires distinct sweep frequencies")
+    fraction = (f_tone - Ff[i_ft]) / dF
+    i_ref = If[i_ft] + fraction * (If[i_neighbor] - If[i_ft])
+    q_ref = Qf[i_ft] + fraction * (Qf[i_neighbor] - Qf[i_ft])
+    return f_tone, i_ref, q_ref, dF, i_ft, i_neighbor
+
+
 # ============================================================================ #
 # iq_to_df_gradient
 def iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone=None, i_ft=None):
@@ -965,39 +994,32 @@ def iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone=None, i_ft=None):
     # Maybe don't care about this!
     # i_f0 = find_i_dvmax(If, Qf)
 
-    # Find the probe tone and/or index.
-    # This sets baseline operating point that df is relative to.
-    if i_ft is None:
-        if f_tone is None:
-            _, _, f_tone, i_ft = find_ftone_median(I, Q, If, Qf, Ff)
-        else:
-            i_ft = find_i_ftone(Ff, f_tone)
-    # STORE: This could be a stored intermediary product.
-
-    # Frequency sweep step at probe tone.
-    dF = Ff[i_ft + 1] - Ff[i_ft]
+    f_tone, i_ref, q_ref, dF, i_ft, i_neighbor = _iq_tone_reference(
+        I, Q, If, Qf, Ff, f_tone, i_ft)
 
     # Compute the local tangent vector dZ/dF = (dI/dF, dQ/dF).
     # This represents the velocity and direction of the IQ point 
     # along the resonance curve.
-    dIf_dF = (If[i_ft + 1] - If[i_ft]) / dF # V/Hz
-    dQf_dF = (Qf[i_ft + 1] - Qf[i_ft]) / dF
+    dIf_dF = (If[i_neighbor] - If[i_ft]) / dF # V/Hz
+    dQf_dF = (Qf[i_neighbor] - Qf[i_ft]) / dF
 
     # Squared magnitude of the local gradient vector ||dZ/dF||^2.
     # Used for normalizing the scalar projection onto the tangent line.
     denom = dIf_dF**2 + dQf_dF**2
+    if not np.isfinite(denom) or denom == 0 or f_tone == 0:
+        raise ValueError("IQ conversion requires a finite nonzero gradient and probe tone")
 
     # Project the observed displacement vector delta_Z = (I - I0, Q - Q0) 
     # onto the tangent direction using the dot product: 
     # delta_f = (delta_Z . dZ/dF) / ||dZ/dF||^2.
     # This converts spatial displacement in the IQ plane 
     # to an equivalent frequency shift delta_f.
-    df = ((I - If[i_ft])*dIf_dF + (Q - Qf[i_ft])*dQf_dF)/denom
+    df = ((I - i_ref)*dIf_dF + (Q - q_ref)*dQf_dF)/denom
 
     # Normalize by the resonant frequency F0 
     # to yield dimensionless fractional frequency shift (dF/F0).
     # This helps normalize responses across the array.
-    return df / Ff[i_ft]
+    return df / f_tone
 
 
 # ============================================================================ #
@@ -1015,14 +1037,8 @@ def iq_to_df_angle(I, Q, If, Qf, Ff, f_tone=None, i_ft=None):
     i_ft (int):              Probe tone index.
     """
 
-    # Find the probe tone and/or index.
-    # This sets baseline operating point that df is relative to.
-    if i_ft is None:
-        if f_tone is None:
-            _, _, f_tone, i_ft = find_ftone_median(I, Q, If, Qf, Ff)
-        else:
-            i_ft = find_i_ftone(Ff, f_tone)
-    # STORE: This could be a stored intermediary product.
+    f_tone, _, _, _, _, _ = _iq_tone_reference(
+        I, Q, If, Qf, Ff, f_tone, i_ft)
 
     # Estimate the resonance circle center (cI, cQ) 
     # using the bounding box midpoint.
@@ -1041,7 +1057,7 @@ def iq_to_df_angle(I, Q, If, Qf, Ff, f_tone=None, i_ft=None):
 
     # Express frequency relative to probe tone (F0 = 0 Hz) to create a direct 
     # mapping from loop phase angle theta to frequency offset delta_f.
-    dFf = Ff - Ff[i_ft]
+    dFf = Ff - f_tone
 
     # Interpolate observed phase angles against the tuning sweep frequencies 
     # to reconstruct absolute frequency shifts df [Hz].
@@ -1055,7 +1071,7 @@ def iq_to_df_angle(I, Q, If, Qf, Ff, f_tone=None, i_ft=None):
     # Normalize by the resonant frequency F0 
     # to yield dimensionless fractional frequency shift (dF/F0).
     # This helps normalize responses across the array.
-    return df / Ff[i_ft]
+    return df / f_tone
 
 
 # ============================================================================ #
@@ -1076,12 +1092,8 @@ def iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone=None, dF_tol=4):
                              to switch from grad to angle method.
     """
 
-    # Find the probe tone and/or index.
-    # This sets baseline operating point that df is relative to.
-    if f_tone is None:
-        _, _, f_tone, i_ft = find_ftone_median(I, Q, If, Qf, Ff)
-    else:
-        i_ft = find_i_ftone(Ff, f_tone)
+    f_tone, _, _, dF, _, _ = _iq_tone_reference(
+        I, Q, If, Qf, Ff, f_tone)
     
     # First-pass: evaluate all samples using the fast gradient method.
     # This is computationally cheap (vectorized dot product) and accurate for 
@@ -1089,14 +1101,14 @@ def iq_to_df_hybrid(I, Q, If, Qf, Ff, f_tone=None, dF_tol=4):
     df_f = iq_to_df_gradient(I, Q, If, Qf, Ff, f_tone)
 
     # Local frequency resolution of the sweep around probe tone [Hz/step].
-    dF = Ff[i_ft + 1] - Ff[i_ft]
+    dF = abs(dF)
 
     # Flag samples where linear extrapolation exceeds the small-signal regime.
     # Converts df/f0 back to absolute frequency shift df [Hz] 
     # and checks if the excursion exceeds the tolerance window (dF_tol * dF). 
     # Large excursions suffer from tangent-line projection errors 
     # due to IQ loop curvature.
-    i_redo = np.abs(df_f*Ff[i_ft]) > (dF*dF_tol)
+    i_redo = np.abs(df_f*f_tone) > (dF*dF_tol)
 
     # Recalculate flagged samples with angle method.
     if i_redo.any():

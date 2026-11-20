@@ -48,7 +48,7 @@ file_format = "h5"
 # Data organization inside the files. (string)
 # "simulation" reads TOAST-style simulation data. "lab" reads draft HDF5 IQ
 # data, aligns detector times, and uses housekeeping pointing.
-format = "simulation"
+format = "lab"
 
 
 

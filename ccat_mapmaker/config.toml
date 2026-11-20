@@ -78,11 +78,14 @@ format = "lab"
 # access to SIMBAD.
 #target = "jupiter"
 # Use "fyst" only when the observation was actually taken at FYST.
-#site = "fyst"
+# site = "fyst"
 # Alternatively provide all three site coordinates (east-positive longitude).
 #site_lat_deg = -22.98592
 #site_lon_deg = -67.74028
 #site_height_m = 5610
+site_lat_deg = 42.4498
+site_lon_deg = -76.4811
+site_height_m = 264
 
 # Map extent in degrees. Each axis is independent: omit xlen_deg and/or
 # ylen_deg to size that axis automatically from finite, usable pointing for

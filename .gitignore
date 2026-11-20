@@ -7,6 +7,11 @@ __pycache__/
 ccat_mapmaker/output/
 ccat_mapmaker/notebooks/*
 !ccat_mapmaker/notebooks/pointing_reconstruction.ipynb
+!ccat_mapmaker/notebooks/make_swg_presentation.py
+!ccat_mapmaker/notebooks/CCAT_SWG_mapmaker.md
+!ccat_mapmaker/notebooks/presentation_assets/
+ccat_mapmaker/notebooks/presentation_assets/*
+!ccat_mapmaker/notebooks/presentation_assets/*.png
 external/
 initial_readings/
 logbook.md

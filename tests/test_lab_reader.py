@@ -52,10 +52,12 @@ class LabReaderTests(unittest.TestCase):
 
     def write_block(self, f, block, *, comb=True):
         if "hk" not in f:
-            hk = f.create_group("hk/frames/0/blocks/0")
+            frame = f.create_group("hk/frames/0")
+            frame.attrs["address"] = "observatory.acu.feeds.acu_udp_stream"
+            hk = frame.create_group("blocks/0")
             hk["times"] = np.arange(-1, 8, dtype=np.int64) * 100000000
-            hk["Azimuth_current_position"] = np.full(9, 20.)
-            hk["Elevation_current_position"] = np.full(9, 21.)
+            hk["Azimuth"] = np.full(9, 20.)
+            hk["Elevation"] = np.full(9, 21.)
         frame = f.create_group(f"timestream/{block}/frames/1")
         frame.attrs["frame_type"] = "Scan"
         data = frame.create_group("data")
@@ -208,12 +210,21 @@ class LabReaderTests(unittest.TestCase):
             with h5py.File(path, "w") as f:
                 self.write_block(f, "B1D1")
                 hk = f["hk/frames/0/blocks/0"]
-                hk["Azimuth_current_position"][:] = [359., 359., 1., 1., 1., 1., 1., 1., 1.]
+                hk["Azimuth"][:] = [359., 359., 1., 1., 1., 1., 1., 1., 1.]
+                hk["Elevation"][:] = [21., 21., 23., 23., 23., 23., 23., 23., 23.]
+                status = f.create_group("hk/frames/1")
+                status.attrs["address"] = "observatory.acu.feeds.acu_status"
+                block = status.create_group("blocks/0")
+                block["times"] = np.arange(-1, 8, dtype=np.int64) * 100000000
+                block["Azimuth_current_position"] = np.full(9, 100.)
+                block["Elevation_current_position"] = np.full(9, 45.)
+                block["Azimuth"] = np.full(9, 100.)
+                block["Elevation"] = np.full(9, 45.)
                 f["timestream/B1D1/frames/1/data/times"][:] = [0, 50000000, 100000000]
             chunk = self.read_frame(path)
             expected = SkyCoord(
                 az=np.array([359., 0., 1.]) * u.deg,
-                alt=np.full(3, 21.) * u.deg,
+                alt=np.array([21., 22., 23.]) * u.deg,
                 frame=AltAz(obstime=Time([0., .5, 1.], format="unix", scale="utc"),
                             location=self.reader.coord.FYST_SITE, pressure=0 * u.hPa),
             ).icrs
@@ -221,23 +232,62 @@ class LabReaderTests(unittest.TestCase):
             np.testing.assert_allclose(chunk.dec_bore, expected.dec.deg, atol=1e-10)
 
     def test_rejects_missing_or_gapped_pointing(self):
-        for defect in ("missing", "gap"):
+        for defect in ("missing", "wrong_address", "incomplete", "missing_times",
+                       "duplicate_times", "gap"):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as temp:
                 path = Path(temp) / "lab.h5"
                 with h5py.File(path, "w") as f:
                     self.write_block(f, "B1D1")
                     if defect == "missing":
                         del f["hk"]
+                    elif defect == "wrong_address":
+                        f["hk/frames/0"].attrs["address"] = "observatory.acu.feeds.acu_status"
+                    elif defect == "incomplete":
+                        del f["hk/frames/0/blocks/0/Elevation"]
+                    elif defect == "missing_times":
+                        del f["hk/frames/0/blocks/0/times"]
+                    elif defect == "duplicate_times":
+                        hk = f["hk/frames/0/blocks/0"]
+                        hk["times"][1] = hk["times"][0]
                     else:
                         hk = f["hk/frames/0/blocks/0"]
                         del hk["times"]
-                        del hk["Azimuth_current_position"]
-                        del hk["Elevation_current_position"]
+                        del hk["Azimuth"]
+                        del hk["Elevation"]
                         hk["times"] = np.array([-1, 0, 3, 4], dtype=np.int64) * 100000000
-                        hk["Azimuth_current_position"] = np.full(4, 20.)
-                        hk["Elevation_current_position"] = np.full(4, 21.)
+                        hk["Azimuth"] = np.full(4, 20.)
+                        hk["Elevation"] = np.full(4, 21.)
                 with self.assertRaisesRegex(ValueError, "housekeeping"):
                     self.read_frame(path)
+
+    def test_udp_pointing_interpolates_across_frames(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "lab.h5"
+            with h5py.File(path, "w") as f:
+                self.write_block(f, "B1D1")
+                frame = f["hk/frames/0"]
+                block = frame["blocks/0"]
+                del block["times"]
+                del block["Azimuth"]
+                del block["Elevation"]
+                block["times"] = np.array([-1, 0], dtype=np.int64) * 100000000
+                block["Azimuth"] = [19., 20.]
+                block["Elevation"] = [20., 21.]
+                f.copy(frame, "hk/frames/1")
+                block = f["hk/frames/1/blocks/0"]
+                block["times"][:] = [100000000, 200000000]
+                block["Azimuth"][:] = [21., 22.]
+                block["Elevation"][:] = [22., 23.]
+                f["timestream/B1D1/frames/1/data/times"][:] = [0, 50000000, 100000000]
+            chunk = self.read_frame(path)
+            expected = SkyCoord(
+                az=np.array([20., 20.5, 21.]) * u.deg,
+                alt=np.array([21., 21.5, 22.]) * u.deg,
+                frame=AltAz(obstime=Time([0., .5, 1.], format="unix", scale="utc"),
+                            location=self.reader.coord.FYST_SITE, pressure=0 * u.hPa),
+            ).icrs
+            np.testing.assert_allclose(chunk.ra_bore, expected.ra.deg, atol=1e-10)
+            np.testing.assert_allclose(chunk.dec_bore, expected.dec.deg, atol=1e-10)
 
     def test_lab_requires_explicit_site(self):
         with tempfile.TemporaryDirectory() as temp:

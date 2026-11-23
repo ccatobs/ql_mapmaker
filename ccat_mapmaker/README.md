@@ -107,9 +107,13 @@ chunk. When high-pass or notch filtering is enabled, such gaps cause an error
 rather than contaminating a whole filtered timestream. Adjust the chunking or
 disable those filters for the affected data.
 
-Lab pointing uses time-interpolated housekeeping azimuth/elevation (azimuth
-measured east of north, in degrees) and a zero-pressure AltAz-to-ICRS
-transformation. It requires an explicitly configured observing site:
+Lab pointing uses `Azimuth` and `Elevation` from housekeeping frames with
+address `observatory.acu.feeds.acu_udp_stream`, interpolated using the HDF5
+block `times` onto the detector grid. The reader currently assumes angles in
+degrees, with azimuth east of north in the range [0, 360), and uses a
+zero-pressure AltAz-to-ICRS transformation. The producer's angle and timestamp
+conventions still need confirmation. It requires an explicitly configured
+observing site:
 
 ```toml
 [map]
@@ -120,7 +124,9 @@ site = "fyst"             # Only if FYST is the actual observing site
 # site_height_m = ...
 ```
 
-Missing or gapped housekeeping coverage is an error. Astropy requires
+Missing UDP pointing or gaps wider than 1.5 times its median cadence are
+errors; the reader does not fall back to the slower `acu_status` feed. The
+selected feed and median cadence are logged. Astropy requires
 appropriate Earth-orientation data for the observation time. No detector
 focal-plane offsets are available in this lab format, so all detectors use
 boresight pointing; per-detector maps log a warning if offsets were requested.

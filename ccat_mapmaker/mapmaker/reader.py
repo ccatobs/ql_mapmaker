@@ -414,12 +414,19 @@ def _load_lab_pointing(f: h5py.File):
         raise ValueError("Lab file is missing housekeeping frames")
     samples = []
     for frame in f["hk/frames"].values():
-        if "blocks" not in frame:
+        address = frame.attrs.get("address", "")
+        if isinstance(address, bytes):
+            address = address.decode("utf-8")
+        if address != "observatory.acu.feeds.acu_udp_stream":
             continue
+        if "blocks" not in frame:
+            raise ValueError(f"Lab UDP housekeeping frame {frame.name} has no blocks")
         for block in frame["blocks"].values():
-            fields = ("times", "Azimuth_current_position", "Elevation_current_position")
-            if not all(name in block for name in fields):
+            fields = ("times", "Azimuth", "Elevation")
+            if not any(name in block for name in fields[1:]):
                 continue
+            if not all(name in block for name in fields):
+                raise ValueError(f"Incomplete lab UDP housekeeping pointing in {block.name}")
             times = np.asarray(block["times"])
             az = np.asarray(block[fields[1]], dtype=float)
             el = np.asarray(block[fields[2]], dtype=float)
@@ -430,7 +437,7 @@ def _load_lab_pointing(f: h5py.File):
                 raise ValueError(f"Invalid lab housekeeping pointing in {block.name}")
             samples.append((times.astype(np.int64), az, el))
     if not samples:
-        raise ValueError("Lab file has no housekeeping azimuth/elevation samples")
+        raise ValueError("Lab file has no acu_udp_stream housekeeping azimuth/elevation samples")
     times = np.concatenate([s[0] for s in samples])
     az = np.concatenate([s[1] for s in samples])
     el = np.concatenate([s[2] for s in samples])
@@ -439,7 +446,11 @@ def _load_lab_pointing(f: h5py.File):
     differences = np.diff(times)
     if len(differences) == 0 or np.any(differences <= 0):
         raise ValueError("Lab housekeeping pointing timestamps must be strictly increasing")
-    return times, np.unwrap(np.deg2rad(az)), el, float(np.median(differences))
+    cadence = float(np.median(differences))
+    LOGGER.info("Lab pointing: observatory.acu.feeds.acu_udp_stream "
+                "(%d samples, median cadence %.6f s)",
+                len(times), cadence / _LAB_TICKS_PER_SECOND)
+    return times, np.unwrap(np.deg2rad(az)), el, cadence
 
 
 def _lab_brackets(times: np.ndarray, targets: np.ndarray, cadence: float):
@@ -538,7 +549,7 @@ def _iter_h5_lab_chunks(
                 targets = np.arange(start, stop, dtype=float) * cadence
                 _, _, pointing_valid = _lab_brackets(hk_times, targets, hk_cadence)
                 if not np.all(pointing_valid):
-                    raise ValueError(f"Lab file {path}: housekeeping pointing does not cover the detector timestamps")
+                    raise ValueError(f"Lab file {path}: UDP housekeeping pointing is missing or gapped at detector timestamps")
                 az = np.rad2deg(np.interp(targets, hk_times, hk_az)) % 360
                 el = np.interp(targets, hk_times, hk_el)
                 unix_times = origin / _LAB_TICKS_PER_SECOND + targets / _LAB_TICKS_PER_SECOND

@@ -36,8 +36,8 @@
 # expanded recursively and only files matching data.file_format are opened.
 # input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/orionA_ATMdata_d100_primecam_f350/sim_PCAM280_h5_ORIONA_2026_07_15_d100"]
 # input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/orionA_ATMdata_d100_primecam_f280/sim_PCAM280_h5_ORIONA_2026_07_15_d100"]
-# input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/planet_ATMdata_d3426/sim_PCAM280_h5_Jupiter_d3426"]
-input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/lab/sample_h5"]
+input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/sims/planet_ATMdata_d3426/sim_PCAM280_h5_Jupiter_d3426"]
+# input_dirs = ["/media/player1/blast2020fc1/map_making/data_samples/lab/sample_h5"]
 # input_dirs = ["/Users/james/notebooks/data/ql_mm_samples/lab/sample_h5"]
 
 # On-disk file extension/type. (string)
@@ -48,7 +48,7 @@ file_format = "h5"
 # Data organization inside the files. (string)
 # "simulation" reads TOAST-style simulation data. "lab" reads draft HDF5 IQ
 # data, aligns detector times, and uses housekeeping pointing.
-format = "lab"
+format = "simulation"
 
 
 
@@ -78,14 +78,11 @@ format = "lab"
 # access to SIMBAD.
 #target = "jupiter"
 # Use "fyst" only when the observation was actually taken at FYST.
-# site = "fyst"
+#site = "fyst"
 # Alternatively provide all three site coordinates (east-positive longitude).
-#site_lat_deg = -22.98592
-#site_lon_deg = -67.74028
-#site_height_m = 5610
-site_lat_deg = 42.4498
-site_lon_deg = -76.4811
-site_height_m = 264
+#site_lat_deg = 42.4498 # cornell
+#site_lon_deg = -76.4811
+#site_height_m = 264
 
 # Map extent in degrees. Each axis is independent: omit xlen_deg and/or
 # ylen_deg to size that axis automatically from finite, usable pointing for

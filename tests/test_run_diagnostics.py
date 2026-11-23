@@ -842,6 +842,33 @@ class RunDiagnosticsTests(unittest.TestCase):
         self.assertEqual(hits[0, 0, 0], len(signal) - 2)
         self.assertTrue(any("boresight pointing" in line for line in logs.output))
 
+    def test_saved_noise_comes_from_final_pass(self):
+        for iterations in (0, 1, 2):
+            with self.subTest(iterations=iterations), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                config, _ = self.make_config(root)
+                config.write_text(config.read_text().replace(
+                    "n_iterations = 1", f"n_iterations = {iterations}"))
+                calls = []
+                original = self.runner._mapPass
+
+                def capture(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    result["noise_map"] = np.where(
+                        np.isfinite(result["noise_map"]), len(calls) + 1., np.nan)
+                    calls.append(result)
+                    return result
+
+                with mock.patch.object(sys, "argv", ["run_mapmaker", "--config", str(config)]), \
+                     mock.patch.object(self.runner.reader, "_iter_h5_simulation_chunks", self.fake_chunks), \
+                     mock.patch.object(self.runner, "_mapPass", side_effect=capture):
+                    self.runner.main()
+                run, = (root / "results").iterdir()
+                actual = np.load(run / "noise.npy")
+                self.assertGreater(np.isfinite(actual).sum(), 0)
+                self.assertEqual(len(calls), iterations + 1)
+                np.testing.assert_allclose(actual, calls[-1]["noise_map"], equal_nan=True)
+
     def test_saved_nulls_come_from_last_pass(self):
         for iterations in (0, 1):
             with self.subTest(iterations=iterations), tempfile.TemporaryDirectory() as temp:

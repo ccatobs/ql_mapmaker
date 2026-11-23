@@ -368,7 +368,7 @@ Each run does the following:
 | `it_0.npy` / `.png` | After first common-mode pass |
 | `it_N.npy` / `.png` | Map after N common-mode iterations |
 | `hits.npy` / `.png` | Initial-pass sum of detector weights per pixel; raw sample count only with uniform weights |
-| `noise.npy` / `.png` | Initial-pass sample-scatter estimate; not yet validated as an uncertainty for weighted or correlated samples |
+| `noise.npy` / `.png` | Final-pass sample-scatter estimate (`it_0` when there are no iterations); not yet validated as an uncertainty for weighted or correlated samples |
 | `null.npy` / `time_null.png` | Final-pass even/odd chunk-parity half-difference, if `compute_time_null = true` |
 | `detsplit_null.npy` / `.png` | Final-pass balanced random detector-split half-difference, if `compute_detsplit_null = true` |
 | `time_split_weight_0.npy`, `time_split_weight_1.npy` | Final-pass time-split per-pixel weight sums, if enabled |

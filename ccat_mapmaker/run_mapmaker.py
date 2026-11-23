@@ -1055,7 +1055,7 @@ def _makeIterativeMaps(
     cm_maps = [("it_0", combined_map.copy())]
     pass_times = [("naive + it_0", state_2["t_initial"])]
     pass_stats = {"naive + it_0": state_2["processing_stats"]}
-    null_result = state_2
+    final_result = state_2
 
     if n_iters > 0:
 
@@ -1070,7 +1070,7 @@ def _makeIterativeMaps(
                 collect_psd=cfg["output"].get("save_psd", True) and i == n_iters)
             combined_map = s_sp['combined']
             if i == n_iters:
-                null_result = s_sp
+                final_result = s_sp
 
             t_iter = time.perf_counter() - t
             print(f" | Iteration {i}/{n_iters} [{t_iter:.1f}s]")
@@ -1088,12 +1088,13 @@ def _makeIterativeMaps(
         'cm_maps': cm_maps,
         'pass_times': pass_times,
         'pass_stats': pass_stats,
-        'null_map': null_result['null_map'],
-        'detsplit_null_map': null_result['detsplit_null_map'],
-        'time_split_weights': null_result['time_split_weights'],
-        'detector_split_weights': null_result['detector_split_weights'],
-        'detector_split_assignment': null_result['detector_split_assignment'],
-        'psd_comparison': null_result['psd_comparison'],
+        'noise_map': final_result['noise_map'],
+        'null_map': final_result['null_map'],
+        'detsplit_null_map': final_result['detsplit_null_map'],
+        'time_split_weights': final_result['time_split_weights'],
+        'detector_split_weights': final_result['detector_split_weights'],
+        'detector_split_assignment': final_result['detector_split_assignment'],
+        'psd_comparison': final_result['psd_comparison'],
     }
 
 
@@ -1282,7 +1283,7 @@ def _saveOutputs(
     LOGGER.info("Writing map arrays and images to %s", out_dir)
     output.saveMaps(
         state_2["naive"], state_3['cm_maps'], 
-        state_2["hits"], state_2["noise_map"], state_3["null_map"],
+        state_2["hits"], state_3["noise_map"], state_3["null_map"],
         state_1["ra_edges"], state_1["dec_edges"],
         out_dir, cfg["output"], detsplit_null=state_3["detsplit_null_map"],
         time_split_weights=state_3["time_split_weights"],

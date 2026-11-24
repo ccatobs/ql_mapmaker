@@ -262,6 +262,7 @@ class _PsdComparison:
         self.names = [str(names[i]) for i in self.indices]
         self.nperseg = None
         self.freqs = None
+        self.raw_sum = None
         self.before_sum = None
         self.after_sum = None
         self.counts = np.zeros(len(self.indices), dtype=int)
@@ -270,7 +271,8 @@ class _PsdComparison:
         self.nonfinite_spectra = 0
         self.skipped_sample_rate_chunks = 0
 
-    def add(self, before, after, flag_mask, sample_rate):
+    def add(self, before, after, flag_mask, sample_rate, raw=None):
+        raw_input = raw
         if not np.isfinite(sample_rate) or sample_rate <= 0:
             self.skipped_sample_rate_chunks += 1
             return
@@ -281,6 +283,7 @@ class _PsdComparison:
             self.sample_rate = sample_rate
             self.freqs = np.fft.rfftfreq(self.nperseg, 1 / sample_rate)
             shape = (len(self.freqs), len(self.indices))
+            self.raw_sum = np.zeros(shape) if raw is not None else None
             self.before_sum = np.zeros(shape)
             self.after_sum = np.zeros(shape)
         elif not np.isclose(sample_rate, self.sample_rate, rtol=1e-8, atol=0):
@@ -294,7 +297,10 @@ class _PsdComparison:
             raw = before[start:stop]
             cleaned = after[start:stop, self.indices]
             flags = flag_mask[start:stop, self.indices]
+            input_seg = raw_input[start:stop] if raw_input is not None else None
             valid = np.all(np.isfinite(raw) & np.isfinite(cleaned) & np.isfinite(flags), axis=0)
+            if input_seg is not None:
+                valid &= np.all(np.isfinite(input_seg), axis=0)
             if not np.any(valid):
                 continue
             _, p_before = welch(raw[:, valid], fs=sample_rate, window="hann",
@@ -302,8 +308,14 @@ class _PsdComparison:
             _, p_after = welch(cleaned[:, valid], fs=sample_rate, window="hann",
                                nperseg=self.nperseg, noverlap=0, axis=0)
             finite = np.all(np.isfinite(p_before) & np.isfinite(p_after), axis=0)
+            if input_seg is not None:
+                _, p_input = welch(input_seg[:, valid], fs=sample_rate, window="hann",
+                                   nperseg=self.nperseg, noverlap=0, axis=0)
+                finite &= np.all(np.isfinite(p_input), axis=0)
             self.nonfinite_spectra += int(np.count_nonzero(~finite))
             indices = np.flatnonzero(valid)[finite]
+            if input_seg is not None:
+                self.raw_sum[:, indices] += p_input[:, finite]
             self.before_sum[:, indices] += p_before[:, finite]
             self.after_sum[:, indices] += p_after[:, finite]
             self.counts[indices] += 1
@@ -324,13 +336,16 @@ class _PsdComparison:
         valid = self.counts > 0
         info["status"] = "available"
         info["frequency_resolution_hz"] = float(self.freqs[1] - self.freqs[0])
-        return info, {
+        spectra = {
             "frequency_hz": self.freqs,
             "before": self.before_sum[:, valid] / self.counts[valid],
             "after": self.after_sum[:, valid] / self.counts[valid],
             "detectors": np.asarray(self.names)[valid],
             "segment_counts": self.counts[valid],
         }
+        if self.raw_sum is not None:
+            spectra["input"] = self.raw_sum[:, valid] / self.counts[valid]
+        return info, spectra
 
 
 # ============================================================================ #
@@ -709,6 +724,9 @@ def _mapPass(
         flags = chunk.flags[:, idx]
         stats["detector_samples"] += flags.size
         stats["input_flagged_samples"] += int(np.count_nonzero(flags))
+
+        # Input spectra must be captured before the in-place offset subtraction
+        psd_raw = sig[:, psd.indices].copy() if psd is not None else None
         
         # Subtract signal bias
         sig -= state_1["det_offsets_kept"][np.newaxis, :]
@@ -745,7 +763,7 @@ def _mapPass(
                 ra, dec, state_1["ra_edges"], state_1["dec_edges"],
                 current_map)
         if psd is not None:
-            psd.add(psd_before, sig, clean_flag_mask, chunk.sample_rate)
+            psd.add(psd_before, sig, clean_flag_mask, chunk.sample_rate, raw=psd_raw)
 
         # Make map for this chunk (0.2 s)
         if also_naive:
@@ -1227,6 +1245,7 @@ def _savePsdDiagnostics(state_1, state_3, out_dir, out_cfg):
     LOGGER.info("Saving PSD diagnostics for the final map pass and preparation")
     info, comparison = state_3["psd_comparison"]
     info["stage"] = state_3["cm_maps"][-1][0]
+    info["input"] = "unprocessed input signal, before baseline removal and cleaning"
     info["before"] = "after baseline removal and configured cleaning, before common mode"
     info["after"] = "after common-mode subtraction"
     info["segment_selection"] = "matched segments with no input or cleaning flags and finite signals"
@@ -1240,9 +1259,11 @@ def _savePsdDiagnostics(state_1, state_3, out_dir, out_cfg):
         LOGGER.warning("PSD comparison unavailable: no valid matched segments")
     else:
         output.plot_psd(comparison["frequency_hz"], comparison["before"],
-                        comparison["after"], out_dir / "psd.png", info["stage"])
+                        comparison["after"], out_dir / "psd.png", info["stage"],
+                        raw=comparison.get("input"))
         output.plot_psd_ratio(comparison["frequency_hz"], comparison["before"],
-                              comparison["after"], out_dir / "psd_ratio.png", info["stage"])
+                              comparison["after"], out_dir / "psd_ratio.png", info["stage"],
+                              raw=comparison.get("input"))
         if out_cfg.get("save_numpy", True):
             np.savez(out_dir / "psd.npz", **comparison)
 

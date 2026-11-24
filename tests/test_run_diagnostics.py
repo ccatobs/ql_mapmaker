@@ -707,7 +707,7 @@ class RunDiagnosticsTests(unittest.TestCase):
         flags = np.ones_like(before)
         flags[0, 0] = np.nan
         acc = self.runner._PsdComparison(["a", "b"])
-        acc.add(before, after, flags, sample_rate)
+        acc.add(before, after, flags, sample_rate, raw=before + 5.)
         info, result = acc.result()
         self.assertEqual(info["segment_counts"], [2, 3])
         self.assertEqual(info["nperseg"], 2048)
@@ -715,6 +715,7 @@ class RunDiagnosticsTests(unittest.TestCase):
         freq, expected = welch(before[1024:3072, 0], fs=sample_rate, nperseg=2048)
         np.testing.assert_allclose(result["frequency_hz"], freq)
         np.testing.assert_allclose(result["before"][:, 0], expected, atol=1e-12)
+        np.testing.assert_allclose(result["input"], result["before"], atol=1e-9)
         at_8 = np.argmin(abs(freq - 8))
         at_20 = np.argmin(abs(freq - 20))
         self.assertGreater(result["before"][at_8, 0], 1.)
@@ -759,6 +760,7 @@ class RunDiagnosticsTests(unittest.TestCase):
             with np.load(run / "psd.npz") as data:
                 self.assertEqual(data["before"].shape, (65, 2))
                 self.assertEqual(data["after"].shape, (65, 2))
+                self.assertEqual(data["input"].shape, (65, 2))
                 self.assertEqual(data["detectors"].tolist(), ["a", "c"])
             with np.load(run / "weighting_psd.npz") as data:
                 self.assertEqual(data["white_noise_floor"].shape, (3,))

@@ -375,9 +375,9 @@ Each run does the following:
 | `detector_split_weight_0.npy`, `detector_split_weight_1.npy` | Final-pass detector-split per-pixel weight sums, if enabled |
 | `ra_edges.npy`, `dec_edges.npy` | Pixel grid edges (for loading maps in numpy) |
 | `diagnostics.png` | Peak signal, off-source RMS, convergence, and runtime per pass |
-| `psd.png` | Final-pass matched-detector PSD before vs. after common-mode subtraction |
-| `psd_ratio.png` | Per-detector after/before common-mode PSD power ratio (median and 25th–75th percentile), from the same matched spectra as `psd.png` |
-| `psd.npz` | Frequencies, detector names, segment counts and per-detector before/after PSDs |
+| `psd.png` | Final-pass matched-detector PSDs: raw input, cleaned before common mode, and after common-mode subtraction |
+| `psd_ratio.png` | Per-detector PSD power ratios (median and 25th–75th percentile): after/before common mode, and after common mode/raw input |
+| `psd.npz` | Frequencies, detector names, segment counts and per-detector input/before/after PSDs |
 | `weighting_psd.png` | Preparation PSD distribution and white-noise band |
 | `weighting_psd.npz` | Preparation PSD frequency summary and per-detector white-noise floors |
 | `config.toml` | Exact copy of the input configuration |
@@ -421,10 +421,13 @@ automatically a calibrated noise estimate.
 `save_psd = true` (the default) saves the PSD plots independently of
 `save_png`; the `.npz` files additionally require `save_numpy = true`. The
 comparison samples up to 16 evenly spaced retained detectors in the **final**
-map pass. Both spectra use the same matched segments after baseline removal and
-configured cleaning, immediately before and after common-mode subtraction.
-Each detector's spectrum is the mean of its usable Welch segments; the plot
-shows the median and 25th–75th percentile across those detectors. The segment
+map pass. All spectra use the same matched segments: the raw input signal
+(before baseline removal and cleaning), the signal after baseline removal and
+configured cleaning but before common mode, and the signal after common-mode
+subtraction. The final-pass common-mode step is the sky-informed one, so the
+"after" spectrum reflects the sky-protected subtraction, not a plain array mean.
+Each detector's spectrum is the mean of its usable Welch segments; the plots
+show the median and 25th–75th percentile across those detectors. The segment
 length is the smaller of 2048 and the first usable chunk length, with a Hann
 window, 50% overlap within chunks and constant detrending. Segments containing
 input or cleaning flags or non-finite samples are omitted from both spectra.

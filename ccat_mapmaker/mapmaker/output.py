@@ -346,19 +346,24 @@ def _psd_band(ax, freqs, lo, med, hi, color, label):
 
 
 def plot_psd(freqs: np.ndarray, before: np.ndarray, after: np.ndarray,
-             filepath: pathlib.Path, stage: str):
-    """Plot matched final-pass PSDs before and after common-mode subtraction."""
+             filepath: pathlib.Path, stage: str, raw: np.ndarray = None):
+    """Plot matched final-pass PSDs: optional raw input, before and after common mode."""
     fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    has_power = []
+    if raw is not None:
+        has_power.append(_psd_band(ax, freqs, *np.percentile(raw, [25, 50, 75], axis=1),
+                                   "#7f8c8d", "Raw input"))
     has_before = _psd_band(ax, freqs, *np.percentile(before, [25, 50, 75], axis=1),
                            "#e74c3c", "Before common mode")
     has_after = _psd_band(ax, freqs, *np.percentile(after, [25, 50, 75], axis=1),
                           "#2980b9", "After common mode")
+    has_power += [has_before, has_after]
     ax.set_xscale("log")
     ax.set_yscale("log")
-    if not (has_before or has_after):
+    if not any(has_power):
         ax.set_xlim(freqs[1] * 0.8, freqs[-1] * 1.2)
         ax.set_ylim(1e-30, 1)
-    if not (has_before and has_after):
+    if not all(has_power):
         ax.text(0.02, 0.03, "Zero power is omitted on logarithmic axes",
                 transform=ax.transAxes, fontsize=9)
     ax.set_xlabel("Frequency (Hz)")
@@ -371,28 +376,37 @@ def plot_psd(freqs: np.ndarray, before: np.ndarray, after: np.ndarray,
 
 
 def plot_psd_ratio(freqs: np.ndarray, before: np.ndarray, after: np.ndarray,
-                   filepath: pathlib.Path, stage: str):
-    """Plot the per-detector after/before PSD power ratio (median and IQR)."""
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.where(before > 0, after / before, np.nan)
+                   filepath: pathlib.Path, stage: str, raw: np.ndarray = None):
+    """Plot per-detector PSD power ratios (median and IQR) against the final spectrum.
+
+    Always shows after/before common mode; with raw input, also after/raw input.
+    """
+    series = [("After / before common mode", before, "#2980b9")]
+    if raw is not None:
+        series.append(("After common mode / raw input", raw, "#e67e22"))
+
     fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
-    positive = freqs > 0
-    finite_rows = positive & np.any(np.isfinite(ratio), axis=1)
-    if finite_rows.any():
-        lo, med, hi = np.nanpercentile(ratio[finite_rows], [25, 50, 75], axis=1)
-        ax.plot(freqs[finite_rows], med, color="#2980b9", linewidth=1.5,
-                label="Median across detectors")
-        ax.fill_between(freqs[finite_rows], lo, hi, color="#2980b9", alpha=0.2,
-                        label="25th-75th percentile")
-    else:
+    plotted = False
+    for label, reference, color in series:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(reference > 0, after / reference, np.nan)
+        rows = (freqs > 0) & np.any(np.isfinite(ratio), axis=1)
+        if not rows.any():
+            continue
+        lo, med, hi = np.nanpercentile(ratio[rows], [25, 50, 75], axis=1)
+        ax.plot(freqs[rows], med, color=color, linewidth=1.5, label=label)
+        ax.fill_between(freqs[rows], lo, hi, color=color, alpha=0.2)
+        plotted = True
+    if not plotted:
         ax.text(0.5, 0.5, "No finite power ratio", transform=ax.transAxes,
                 ha="center", va="center", color="#777777")
     ax.axhline(1.0, color="#444444", linewidth=1.0, linestyle="--")
     ax.set_xscale("log")
     ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel("PSD ratio (after / before common mode)")
+    ax.set_ylabel("PSD power ratio (median, 25th-75th percentile)")
     ax.set_title(f"Common-mode PSD power ratio: {stage}")
-    ax.legend()
+    if plotted:
+        ax.legend()
     ax.grid(True, which="both", alpha=0.2)
     fig.savefig(filepath, dpi=DPI, bbox_inches="tight")
     plt.close(fig)

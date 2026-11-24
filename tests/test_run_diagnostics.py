@@ -754,6 +754,7 @@ class RunDiagnosticsTests(unittest.TestCase):
             self.assertEqual(info["stage"], "it_1")
             self.assertEqual(info["segment_counts"], [1, 1])
             self.assertTrue((run / "psd.png").is_file())
+            self.assertTrue((run / "psd_ratio.png").is_file())
             self.assertTrue((run / "weighting_psd.png").is_file())
             with np.load(run / "psd.npz") as data:
                 self.assertEqual(data["before"].shape, (65, 2))
@@ -771,6 +772,7 @@ class RunDiagnosticsTests(unittest.TestCase):
             other_metadata = json.loads((without_psd / "metadata.json").read_text())
             self.assertEqual(other_metadata["psd_diagnostics"]["status"], "disabled")
             self.assertFalse((without_psd / "psd.png").exists())
+            self.assertFalse((without_psd / "psd_ratio.png").exists())
             for name in ("naive.npy", "it_0.npy", "it_1.npy"):
                 np.testing.assert_array_equal(np.load(run / name), np.load(without_psd / name))
 

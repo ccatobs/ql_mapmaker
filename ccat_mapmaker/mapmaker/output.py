@@ -370,6 +370,34 @@ def plot_psd(freqs: np.ndarray, before: np.ndarray, after: np.ndarray,
     plt.close(fig)
 
 
+def plot_psd_ratio(freqs: np.ndarray, before: np.ndarray, after: np.ndarray,
+                   filepath: pathlib.Path, stage: str):
+    """Plot the per-detector after/before PSD power ratio (median and IQR)."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(before > 0, after / before, np.nan)
+    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    positive = freqs > 0
+    finite_rows = positive & np.any(np.isfinite(ratio), axis=1)
+    if finite_rows.any():
+        lo, med, hi = np.nanpercentile(ratio[finite_rows], [25, 50, 75], axis=1)
+        ax.plot(freqs[finite_rows], med, color="#2980b9", linewidth=1.5,
+                label="Median across detectors")
+        ax.fill_between(freqs[finite_rows], lo, hi, color="#2980b9", alpha=0.2,
+                        label="25th-75th percentile")
+    else:
+        ax.text(0.5, 0.5, "No finite power ratio", transform=ax.transAxes,
+                ha="center", va="center", color="#777777")
+    ax.axhline(1.0, color="#444444", linewidth=1.0, linestyle="--")
+    ax.set_xscale("log")
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("PSD ratio (after / before common mode)")
+    ax.set_title(f"Common-mode PSD power ratio: {stage}")
+    ax.legend()
+    ax.grid(True, which="both", alpha=0.2)
+    fig.savefig(filepath, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_weighting_psd(freqs: np.ndarray, summary: np.ndarray, sample_rate: float,
                        filepath: pathlib.Path):
     """Plot the actual preparation-pass spectra used for detector weighting."""

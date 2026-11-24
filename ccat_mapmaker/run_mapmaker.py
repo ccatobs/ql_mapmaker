@@ -1241,6 +1241,8 @@ def _savePsdDiagnostics(state_1, state_3, out_dir, out_cfg):
     else:
         output.plot_psd(comparison["frequency_hz"], comparison["before"],
                         comparison["after"], out_dir / "psd.png", info["stage"])
+        output.plot_psd_ratio(comparison["frequency_hz"], comparison["before"],
+                              comparison["after"], out_dir / "psd_ratio.png", info["stage"])
         if out_cfg.get("save_numpy", True):
             np.savez(out_dir / "psd.npz", **comparison)
 

@@ -376,6 +376,7 @@ Each run does the following:
 | `ra_edges.npy`, `dec_edges.npy` | Pixel grid edges (for loading maps in numpy) |
 | `diagnostics.png` | Peak signal, off-source RMS, convergence, and runtime per pass |
 | `psd.png` | Final-pass matched-detector PSD before vs. after common-mode subtraction |
+| `psd_ratio.png` | Per-detector after/before common-mode PSD power ratio (median and 25th–75th percentile), from the same matched spectra as `psd.png` |
 | `psd.npz` | Frequencies, detector names, segment counts and per-detector before/after PSDs |
 | `weighting_psd.png` | Preparation PSD distribution and white-noise band |
 | `weighting_psd.npz` | Preparation PSD frequency summary and per-detector white-noise floors |

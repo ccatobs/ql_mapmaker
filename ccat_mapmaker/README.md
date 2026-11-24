@@ -350,6 +350,46 @@ pip install snakeviz
 snakeviz output/<timestamp>/profile.prof
 ```
 
+### Local timing benchmark
+
+From the repository root, run:
+
+```bash
+python ccat_mapmaker/notebooks/benchmark_mapmaker.py
+```
+
+This runs the local 100-detector Orion A HDF5 simulation at full sample rate
+with a fixed 10-second chunk size and a requested 30-second window. It compares
+zero through five selected iteration counts, the two null maps, cosmic-ray
+cleaning, and PNG/PSD output. The minimum case still performs preparation, gap
+filling, the naive and initial common-mode maps, and saves NumPy products. Each
+feature comparison starts from the three-iteration case; it is not an
+all-features production configuration. All runs use uniform weights and
+disable detector exclusion and other optional cleaning.
+
+The script warms up once, then runs three randomized blocks of cases. It saves
+`benchmark.png`, raw measurements and mapmaker metadata in `results.json`, plus
+the configurations and console logs, under a new timestamped directory in
+`notebooks/benchmark_results/`. Map products are temporary. Use `--help` to
+choose another input directory, duration, chunk size, repeat count, or output
+location. Configurations record their temporary output directories, so rerun the
+benchmark script rather than the saved configurations directly.
+
+The plot shows subprocess wall time, including startup and output, normalized
+by retained detectors and the actual yielded observation duration
+(retained time samples divided by sample rate). Time limits apply at chunk
+boundaries, so the actual duration can differ from the request. Stage times
+come from the mapmaker and exclude startup and other overhead; independently
+calculated stage medians need not sum to the median total. Whiskers show the
+minimum and maximum repeated measurements, not statistical confidence limits.
+Real-time factor is observation duration divided by wall time.
+
+These are warm-cache, local simulation measurements, not predictions for the
+site or RAMSES. Record the machine and storage conditions, run the same workload
+there, and compare equivalent products and map quality. Normalization alone
+does not imply linear scaling with detector count or observation length; fixed
+overhead, data access, map size, and processing options also matter.
+
 ## Pipeline overview
 
 Each run does the following:
